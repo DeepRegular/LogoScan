@@ -1,0 +1,1000 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+
+use eframe::egui::{self, Color32, CursorIcon, Key, PointerButton, Pos2, Sense, Stroke, TextureHandle, TextureOptions, Vec2};
+use lgdscan::detect::{self, Candidate, DetectOptions, Detection};
+use lgdscan::erase;
+use lgdscan::job::{self, Job, Outcome};
+use lgdscan::lgd::{self, Logo};
+use lgdscan::scan::Background;
+use lgdscan::source::{self, ReadOptions, Reader, Rect, Scan, VideoInfo};
+
+fn main() -> eframe::Result {
+    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 860.0]).with_title("lgdscan — ロゴ解析"),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "lgdscan",
+        options,
+        Box::new(move |cc| {
+            install_fonts(&cc.egui_ctx);
+            let mut app = App::default();
+            for a in args {
+                app.open_path(&cc.egui_ctx, a);
+            }
+            Ok(Box::new(app))
+        }),
+    )
+}
+
+/// egui's own fonts have no kana or kanji; add a system font as fallback.
+fn install_fonts(ctx: &egui::Context) {
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/ipafont-gothic/ipagp.ttf",
+        "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+        "C:\\Windows\\Fonts\\YuGothM.ttc",
+        "C:\\Windows\\Fonts\\meiryo.ttc",
+        "C:\\Windows\\Fonts\\msgothic.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+    ];
+    let Some(bytes) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) else { return };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert("jp".into(), Arc::new(egui::FontData::from_owned(bytes)));
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts.families.entry(family).or_default().push("jp".into());
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// Work on another thread, with progress and a way to stop it.
+struct Task<T> {
+    rx: mpsc::Receiver<Result<T, String>>,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<(f32, String)>>,
+}
+
+impl<T: Send + 'static> Task<T> {
+    fn spawn(
+        ctx: &egui::Context,
+        f: impl FnOnce(&AtomicBool, &(dyn Fn(f32, String) + Sync)) -> Result<T, String> + Send + 'static,
+    ) -> Task<T> {
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(Mutex::new((0.0, String::new())));
+        let (c, p, ctx) = (cancel.clone(), progress.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let report = |f: f32, s: String| {
+                *p.lock().unwrap() = (f, s);
+                ctx.request_repaint();
+            };
+            let r = f(&c, &report);
+            let _ = tx.send(r);
+            ctx.request_repaint();
+        });
+        Task { rx, cancel, progress }
+    }
+
+    fn poll(&self) -> Option<Result<T, String>> {
+        match self.rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err("処理が途中で止まりました".into())),
+        }
+    }
+
+    fn progress(&self) -> (f32, String) {
+        self.progress.lock().unwrap().clone()
+    }
+}
+
+struct Grabbed {
+    time: f64,
+    rgb: Vec<u8>,
+    erased: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy)]
+enum Drag {
+    New { anchor: Pos2 },
+    Move { from: Pos2, start: Rect },
+    Resize { left: bool, top: bool, right: bool, bottom: bool, start: Rect },
+}
+
+struct View {
+    /// Screen points per picture pixel.
+    scale: f32,
+    /// Picture coordinates shown at the middle of the view.
+    center: Vec2,
+    fit: bool,
+}
+
+impl View {
+    fn to_screen(&self, area: egui::Rect, p: Pos2) -> Pos2 {
+        area.center() + (p.to_vec2() - self.center) * self.scale
+    }
+    fn to_image(&self, area: egui::Rect, s: Pos2) -> Pos2 {
+        ((s - area.center()) / self.scale + self.center).to_pos2()
+    }
+    fn rect_to_screen(&self, area: egui::Rect, r: Rect) -> egui::Rect {
+        egui::Rect::from_min_max(
+            self.to_screen(area, Pos2::new(r.x as f32, r.y as f32)),
+            self.to_screen(area, Pos2::new((r.x + r.w) as f32, (r.y + r.h) as f32)),
+        )
+    }
+}
+
+struct App {
+    inputs: Vec<PathBuf>,
+    info: Option<VideoInfo>,
+    status: String,
+
+    time: f64,
+    shown_time: Option<f64>,
+    frame_rgb: Option<Vec<u8>>,
+    erased_rgb: Option<Vec<u8>>,
+    frame_tex: Option<TextureHandle>,
+    tex_nearest: bool,
+    tex_erased: bool,
+    grab: Option<Task<Grabbed>>,
+    grab_again: bool,
+
+    rect: Rect,
+    drag: Option<Drag>,
+    view: View,
+
+    detect_task: Option<Task<Detection>>,
+    detection: Option<Detection>,
+    share: f32,
+    margin: u32,
+    candidates: Vec<Candidate>,
+    show_presence: bool,
+    presence_tex: Option<(f32, TextureHandle)>,
+
+    range_on: bool,
+    range: (f64, f64),
+    step: u32,
+    threshold: f64,
+    background: Background,
+    scan: Scan,
+    scan_task: Option<Task<Outcome>>,
+    scan_rect: Rect,
+
+    logo: Option<Logo>,
+    logo_tex: Option<TextureHandle>,
+    outcome: Option<Outcome>,
+    show_erased: bool,
+    name: String,
+}
+
+impl Default for App {
+    fn default() -> App {
+        App {
+            inputs: Vec::new(),
+            info: None,
+            status: "録画ファイルをウィンドウに落とすか、「開く…」で選んでください".into(),
+            time: 0.0,
+            shown_time: None,
+            frame_rgb: None,
+            erased_rgb: None,
+            frame_tex: None,
+            tex_nearest: false,
+            tex_erased: false,
+            grab: None,
+            grab_again: false,
+            rect: Rect { x: 0, y: 0, w: 0, h: 0 },
+            drag: None,
+            view: View { scale: 1.0, center: Vec2::ZERO, fit: true },
+            detect_task: None,
+            detection: None,
+            share: 0.45,
+            margin: 3,
+            candidates: Vec::new(),
+            show_presence: true,
+            presence_tex: None,
+            range_on: false,
+            range: (0.0, 0.0),
+            step: 1,
+            threshold: 12.0,
+            background: Background::Plane,
+            scan: Scan::Auto,
+            scan_task: None,
+            scan_rect: Rect { x: 0, y: 0, w: 0, h: 0 },
+            logo: None,
+            logo_tex: None,
+            outcome: None,
+            show_erased: false,
+            name: String::new(),
+        }
+    }
+}
+
+fn fmt_time(t: f64) -> String {
+    let t = t.max(0.0);
+    let h = (t / 3600.0) as u64;
+    let m = ((t % 3600.0) / 60.0) as u64;
+    let s = t % 60.0;
+    format!("{h}:{m:02}:{s:06.3}")
+}
+
+fn rect_text(r: Rect) -> String {
+    format!("{},{}  {}×{}", r.x, r.y, r.w, r.h)
+}
+
+fn same_rect(a: Rect, b: Rect) -> bool {
+    (a.x, a.y, a.w, a.h) == (b.x, b.y, b.w, b.h)
+}
+
+impl App {
+    fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lgd")) {
+            self.load_lgd(ctx, &path);
+            return;
+        }
+        if self.inputs.is_empty() {
+            self.set_inputs(ctx, vec![path]);
+        } else if !self.inputs.contains(&path) {
+            self.inputs.push(path);
+        }
+    }
+
+    fn set_inputs(&mut self, ctx: &egui::Context, inputs: Vec<PathBuf>) {
+        let Some(first) = inputs.first() else { return };
+        match source::probe(first) {
+            Ok(info) => {
+                self.status = format!(
+                    "{}×{}  {:.3} fps  {}  {}",
+                    info.width,
+                    info.height,
+                    info.frame_rate,
+                    fmt_time(info.duration),
+                    if info.interlaced { "インターレース" } else { "プログレッシブ" }
+                );
+                self.time = (info.duration / 2.0).max(0.0);
+                self.range = (0.0, info.duration);
+                if self.rect.w == 0 || self.rect.x + self.rect.w > info.width || self.rect.y + self.rect.h > info.height {
+                    self.rect = Rect { x: info.width * 3 / 4, y: info.height / 20, w: info.width / 6, h: info.height / 12 };
+                }
+                self.info = Some(info);
+                self.inputs = inputs;
+                self.view.fit = true;
+                self.detection = None;
+                self.candidates.clear();
+                self.presence_tex = None;
+                self.frame_rgb = None;
+                self.erased_rgb = None;
+                self.frame_tex = None;
+                self.shown_time = None;
+                self.request_frame(ctx);
+            }
+            Err(e) => self.status = format!("開けません: {e}"),
+        }
+    }
+
+    fn load_lgd(&mut self, ctx: &egui::Context, path: &Path) {
+        let r = File::open(path).and_then(|f| lgd::read(BufReader::new(f)));
+        match r {
+            Ok(logos) if !logos.is_empty() => {
+                let l = logos.into_iter().next().unwrap();
+                self.rect = Rect { x: l.x.max(0) as u32, y: l.y.max(0) as u32, w: l.w as u32, h: l.h as u32 };
+                self.name = l.name_lossy();
+                self.status = format!("{} を読みました（{}）", path.display(), rect_text(self.rect));
+                self.set_logo(ctx, l, None);
+            }
+            Ok(_) => self.status = "ロゴが入っていません".into(),
+            Err(e) => self.status = format!("{}: {e}", path.display()),
+        }
+    }
+
+    fn set_logo(&mut self, ctx: &egui::Context, logo: Logo, outcome: Option<Outcome>) {
+        let max = logo.pixels.iter().map(|p| p.dp_y).max().unwrap_or(1).max(1) as f32;
+        let rgb: Vec<u8> = logo
+            .pixels
+            .iter()
+            .flat_map(|p| {
+                let v = (p.dp_y.max(0) as f32 / max * 255.0) as u8;
+                [v, v, v]
+            })
+            .collect();
+        let img = egui::ColorImage::from_rgb([logo.w as usize, logo.h as usize], &rgb);
+        self.logo_tex = Some(ctx.load_texture("logo", img, TextureOptions::NEAREST));
+        self.logo = Some(logo);
+        self.outcome = outcome;
+        self.erased_rgb = None;
+        self.frame_tex = None;
+        if self.show_erased {
+            self.request_frame(ctx);
+        }
+    }
+
+    fn request_frame(&mut self, ctx: &egui::Context) {
+        if self.grab.is_some() {
+            self.grab_again = true;
+            return;
+        }
+        let (Some(path), Some(info)) = (self.inputs.first().cloned(), self.info.clone()) else { return };
+        let at = self.time;
+        let logo = if self.show_erased { self.logo.clone() } else { None };
+        self.grab = Some(Task::spawn(ctx, move |_, _| {
+            let rgb = source::grab_rgb(&path, &info, at).map_err(|e| e.to_string())?;
+            let erased = logo.and_then(|l| erased_picture(&path, &info, &l, at, &rgb).ok());
+            Ok(Grabbed { time: at, rgb, erased })
+        }));
+    }
+
+    fn poll_tasks(&mut self, ctx: &egui::Context) {
+        if let Some(r) = self.grab.as_ref().and_then(|t| t.poll()) {
+            self.grab = None;
+            match r {
+                Ok(g) => {
+                    self.shown_time = Some(g.time);
+                    self.frame_rgb = Some(g.rgb);
+                    self.erased_rgb = g.erased;
+                    self.frame_tex = None;
+                }
+                Err(e) => self.status = e,
+            }
+            if self.grab_again {
+                self.grab_again = false;
+                self.request_frame(ctx);
+            }
+        }
+        if let Some(r) = self.detect_task.as_ref().and_then(|t| t.poll()) {
+            self.detect_task = None;
+            match r {
+                Ok(d) => {
+                    self.detection = Some(d);
+                    self.refresh_candidates(true);
+                }
+                Err(e) => self.status = e,
+            }
+        }
+        if let Some(r) = self.scan_task.as_ref().and_then(|t| t.poll()) {
+            self.scan_task = None;
+            match r {
+                Ok(o) => {
+                    let logo = o.logo(Vec::new(), self.scan_rect);
+                    self.status = if o.peak < 50 {
+                        format!("ロゴが見つかりませんでした（dp の最大 {}）。範囲か閾値を見直してください", o.peak)
+                    } else {
+                        format!("解析が終わりました（{} フレームを使用）", o.frames_used)
+                    };
+                    self.show_erased = true;
+                    self.show_presence = false;
+                    self.set_logo(ctx, logo, Some(o));
+                }
+                Err(e) => self.status = e,
+            }
+        }
+    }
+
+    fn refresh_candidates(&mut self, pick_first: bool) {
+        let Some(d) = &self.detection else { return };
+        self.candidates = d.candidates(self.share, self.margin);
+        if pick_first {
+            match self.candidates.first() {
+                Some(c) => {
+                    self.rect = c.rect;
+                    self.status = format!(
+                        "キーフレーム {} 枚から、ロゴらしい場所が {} か所見つかりました。1 番目に枠を合わせました",
+                        d.frames,
+                        self.candidates.len()
+                    );
+                }
+                None => self.status = "ロゴらしい場所が見つかりませんでした。割合を下げてみてください".into(),
+            }
+        }
+        self.presence_tex = None;
+    }
+
+    fn start_detect(&mut self, ctx: &egui::Context) {
+        let (Some(path), Some(info)) = (self.inputs.first().cloned(), self.info.clone()) else { return };
+        let (start, end) = if self.range_on { (Some(self.range.0), Some(self.range.1)) } else { (None, None) };
+        self.detect_task = Some(Task::spawn(ctx, move |cancel, report| {
+            let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            let opt = DetectOptions { samples: 120, start, end, threads };
+            detect::measure(&path, &info, &opt, &|f| report(f as f32, format!("キーフレームを読んでいます {:.0}%", f * 100.0)), cancel)
+        }));
+    }
+
+    fn start_scan(&mut self, ctx: &egui::Context) {
+        let mut job = Job::new(self.inputs.clone(), self.rect);
+        if self.range_on {
+            job.start = Some(self.range.0);
+            job.end = Some(self.range.1);
+        }
+        job.step = self.step;
+        job.threshold = self.threshold;
+        job.background = self.background;
+        job.scan = self.scan;
+        self.scan_rect = self.rect;
+        self.scan_task = Some(Task::spawn(ctx, move |cancel, report| {
+            job::run(
+                &job,
+                &mut |p| {
+                    let text = if p.fitting {
+                        format!("{} フレーム中 {} フレームで当てはめています…", p.seen, p.accepted)
+                    } else {
+                        format!("{}/{} 本目  {} フレーム読み、{} フレームが使えます", p.input + 1, p.inputs, p.seen, p.accepted)
+                    };
+                    let f = (p.input as f64 + p.fraction) / p.inputs as f64;
+                    report(f as f32, text);
+                },
+                cancel,
+            )
+        }));
+    }
+
+    fn save_lgd(&mut self) {
+        let Some(logo) = &self.logo else { return };
+        if let Err(bad) = lgd::encode_name(&self.name) {
+            self.status = format!("ロゴ名に CP932 で書けない文字があります: {bad}");
+            return;
+        }
+        let default = if self.name.is_empty() { "logo.lgd".to_string() } else { format!("{}.lgd", self.name) };
+        let Some(path) = rfd::FileDialog::new().add_filter("ロゴデータ", &["lgd"]).set_file_name(&default).save_file() else { return };
+        let mut logo = logo.clone();
+        let name = if self.name.is_empty() {
+            path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+        } else {
+            self.name.clone()
+        };
+        logo.name = match lgd::encode_name(&name) {
+            Ok(b) => lgd::stored_name(&b).to_vec(),
+            Err(bad) => {
+                self.status = format!("ロゴ名に CP932 で書けない文字があります: {bad}");
+                return;
+            }
+        };
+        let r = File::create(&path).and_then(|f| {
+            let mut w = BufWriter::new(f);
+            lgd::write(&mut w, &[logo])?;
+            w.flush()
+        });
+        self.status = match r {
+            Ok(()) => format!("{} に保存しました", path.display()),
+            Err(e) => format!("保存できません: {e}"),
+        };
+    }
+
+    fn side_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("入力");
+            ui.horizontal(|ui| {
+                if ui.button("開く…").clicked() {
+                    if let Some(files) = rfd::FileDialog::new()
+                        .add_filter("動画", &["ts", "m2ts", "mts", "mp4", "mkv", "mpg", "m2v"])
+                        .add_filter("すべて", &["*"])
+                        .pick_files()
+                    {
+                        self.set_inputs(&ctx, files);
+                    }
+                }
+                if ui
+                    .add_enabled(!self.inputs.is_empty(), egui::Button::new("追加…"))
+                    .on_hover_text("同じ局の録画を足すと、背景の色に幅が出て結果が安定します")
+                    .clicked()
+                {
+                    if let Some(files) = rfd::FileDialog::new().pick_files() {
+                        for f in files {
+                            self.open_path(&ctx, f);
+                        }
+                    }
+                }
+                if ui.button(".lgd を開く…").clicked() {
+                    if let Some(f) = rfd::FileDialog::new().add_filter("ロゴデータ", &["lgd"]).pick_file() {
+                        self.load_lgd(&ctx, &f);
+                    }
+                }
+            });
+            let mut remove = None;
+            for (i, p) in self.inputs.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if i > 0 && ui.small_button("×").clicked() {
+                        remove = Some(i);
+                    }
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    ui.add(egui::Label::new(name).truncate()).on_hover_text(p.display().to_string());
+                });
+            }
+            if let Some(i) = remove {
+                self.inputs.remove(i);
+            }
+
+            ui.separator();
+            ui.heading("ロゴの位置");
+            let (mw, mh) = self.info.as_ref().map_or((u32::MAX, u32::MAX), |i| (i.width, i.height));
+            egui::Grid::new("rect").num_columns(4).show(ui, |ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut self.rect.x).range(0..=mw.saturating_sub(3)));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut self.rect.y).range(0..=mh.saturating_sub(3)));
+                ui.end_row();
+                ui.label("幅");
+                ui.add(egui::DragValue::new(&mut self.rect.w).range(3..=mw));
+                ui.label("高さ");
+                ui.add(egui::DragValue::new(&mut self.rect.h).range(3..=mh));
+                ui.end_row();
+            });
+            if self.rect.x + self.rect.w > mw {
+                self.rect.w = mw - self.rect.x;
+            }
+            if self.rect.y + self.rect.h > mh {
+                self.rect.h = mh - self.rect.y;
+            }
+            ui.label(
+                egui::RichText::new(
+                    "絵の上でドラッグして囲む・動かす・辺を伸ばす。矢印キーで 1 画素ずつ動かし、Shift+矢印で幅と高さを変えます。\
+                     外周の 1 画素を背景として読むので、ロゴにかからないよう少し余白をとってください。",
+                )
+                .small()
+                .weak(),
+            );
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if let Some(t) = &self.detect_task {
+                    let (f, text) = t.progress();
+                    ui.add(egui::ProgressBar::new(f).text(text).desired_width(220.0));
+                    if ui.button("中止").clicked() {
+                        t.cancel.store(true, Ordering::Relaxed);
+                    }
+                } else if ui.add_enabled(self.info.is_some(), egui::Button::new("ロゴの位置を検出")).clicked() {
+                    self.start_detect(&ctx);
+                }
+            });
+            if self.detection.is_some() {
+                let mut changed = false;
+                changed |= ui
+                    .add(egui::Slider::new(&mut self.share, 0.15..=0.95).text("縁の出る割合"))
+                    .on_hover_text("この割合以上のフレームで縁が出ている画素をロゴとみなします")
+                    .changed();
+                changed |= ui.add(egui::Slider::new(&mut self.margin, 0..=24).text("余白（画素）")).changed();
+                if changed {
+                    self.refresh_candidates(false);
+                }
+                ui.checkbox(&mut self.show_presence, "検出した縁を重ねて表示");
+                let mut pick = None;
+                for (i, c) in self.candidates.iter().enumerate() {
+                    let text = format!("{}.  {}   （縁 {} 画素）", i + 1, rect_text(c.rect), c.pixels);
+                    if ui.selectable_label(same_rect(c.rect, self.rect), text).clicked() {
+                        pick = Some(c.rect);
+                    }
+                }
+                if let Some(r) = pick {
+                    self.rect = r;
+                }
+            }
+
+            ui.separator();
+            ui.heading("解析");
+            ui.checkbox(&mut self.range_on, "範囲を指定");
+            if self.range_on {
+                let dur = self.info.as_ref().map_or(0.0, |i| i.duration);
+                ui.horizontal(|ui| {
+                    ui.label("開始");
+                    ui.add(egui::DragValue::new(&mut self.range.0).range(0.0..=dur).speed(1.0).custom_formatter(|v, _| fmt_time(v)));
+                    if ui.small_button("現在位置").clicked() {
+                        self.range.0 = self.time;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("終了");
+                    ui.add(egui::DragValue::new(&mut self.range.1).range(0.0..=dur).speed(1.0).custom_formatter(|v, _| fmt_time(v)));
+                    if ui.small_button("現在位置").clicked() {
+                        self.range.1 = self.time;
+                    }
+                });
+                if self.range.1 < self.range.0 {
+                    std::mem::swap(&mut self.range.0, &mut self.range.1);
+                }
+            }
+            egui::Grid::new("params").num_columns(2).show(ui, |ui| {
+                ui.label("間引き");
+                ui.add(egui::DragValue::new(&mut self.step).range(1..=30).suffix(" フレームに 1 枚"));
+                ui.end_row();
+                ui.label("閾値");
+                ui.add(egui::DragValue::new(&mut self.threshold).range(1.0..=60.0).speed(0.2).suffix(" 階調"))
+                    .on_hover_text("枠の画素が背景のモデルからどれだけ外れてよいか（8 ビットの階調）");
+                ui.end_row();
+                ui.label("背景");
+                let label = |b: Background| match b {
+                    Background::Plane => "勾配",
+                    Background::Flat => "1 色（logoscan と同じ）",
+                };
+                egui::ComboBox::from_id_salt("bg").selected_text(label(self.background)).show_ui(ui, |ui| {
+                    for b in [Background::Plane, Background::Flat] {
+                        ui.selectable_value(&mut self.background, b, label(b));
+                    }
+                });
+                ui.end_row();
+                ui.label("色差の補間");
+                let label = |s: Scan| match s {
+                    Scan::Auto => "自動",
+                    Scan::Progressive => "プログレッシブ",
+                    Scan::Interlaced => "インターレース",
+                };
+                egui::ComboBox::from_id_salt("scan").selected_text(label(self.scan)).show_ui(ui, |ui| {
+                    for s in [Scan::Auto, Scan::Progressive, Scan::Interlaced] {
+                        ui.selectable_value(&mut self.scan, s, label(s));
+                    }
+                });
+                ui.end_row();
+            });
+            ui.add_space(4.0);
+            if let Some(t) = &self.scan_task {
+                let (f, text) = t.progress();
+                ui.add(egui::ProgressBar::new(f).show_percentage());
+                ui.label(text);
+                if ui.button("中止").clicked() {
+                    t.cancel.store(true, Ordering::Relaxed);
+                }
+            } else if ui
+                .add_enabled(self.info.is_some(), egui::Button::new("解析開始").min_size(Vec2::new(120.0, 28.0)))
+                .clicked()
+            {
+                self.start_scan(&ctx);
+            }
+
+            ui.separator();
+            ui.heading("結果");
+            if let (Some(logo), Some(tex)) = (&self.logo, &self.logo_tex) {
+                let w = ui.available_width().min(logo.w as f32 * 3.0);
+                let h = w * logo.h as f32 / logo.w as f32;
+                ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::new(w, h)));
+                let lr = Rect { x: logo.x as u32, y: logo.y as u32, w: logo.w as u32, h: logo.h as u32 };
+                let peak = logo.pixels.iter().map(|p| p.dp_y).max().unwrap_or(0);
+                ui.label(format!("{}   不透明度の最大 {peak} / 1000", rect_text(lr)));
+                if let Some(o) = &self.outcome {
+                    ui.label(format!(
+                        "{} フレームを読み、{} フレームで当てはめ（{} フレームはロゴ無しとして除外）",
+                        o.seen, o.frames_used, o.frames_without_logo
+                    ));
+                }
+                if ui.checkbox(&mut self.show_erased, "ロゴを消して表示").changed() {
+                    self.erased_rgb = None;
+                    self.frame_tex = None;
+                    if self.show_erased {
+                        self.request_frame(&ctx);
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.label("ロゴ名");
+                    ui.text_edit_singleline(&mut self.name);
+                });
+                match lgd::encode_name(&self.name) {
+                    Err(bad) => {
+                        ui.colored_label(Color32::from_rgb(255, 120, 100), format!("CP932 で書けない文字: {bad}"));
+                    }
+                    Ok(b) if b.len() > lgd::NAME_MAX_V1 => {
+                        let kept = lgd::decode_name(lgd::stored_name(&b));
+                        ui.colored_label(Color32::from_rgb(255, 200, 90), format!("{} バイトを超えるので「{kept}」まで書きます", lgd::NAME_MAX_V1));
+                    }
+                    Ok(b) => {
+                        ui.label(egui::RichText::new(format!("CP932 で {} / {} バイト", b.len(), lgd::NAME_MAX_V1)).small().weak());
+                    }
+                }
+                if ui.button("保存…").clicked() {
+                    self.save_lgd();
+                }
+            } else {
+                ui.label(egui::RichText::new("まだありません").weak());
+            }
+        });
+    }
+
+    fn bottom_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let Some(info) = &self.info else {
+            ui.label(&self.status);
+            return;
+        };
+        let (dur, fps) = (info.duration.max(0.0), if info.frame_rate > 0.0 { info.frame_rate } else { 29.97 });
+        ui.horizontal(|ui| {
+            let mut jump = None;
+            for (label, d) in [("−10秒", -10.0), ("−1秒", -1.0), ("◀", -1.0 / fps), ("▶", 1.0 / fps), ("+1秒", 1.0), ("+10秒", 10.0)] {
+                if ui.button(label).clicked() {
+                    jump = Some(d);
+                }
+            }
+            ui.label(format!("{} / {}", fmt_time(self.time), fmt_time(dur)));
+            if ui.button("全体表示").on_hover_text("ホイールで拡大・縮小、右ボタンか中ボタンのドラッグで移動、右ダブルクリックで全体表示").clicked() {
+                self.view.fit = true;
+            }
+            if self.grab.is_some() {
+                ui.spinner();
+            }
+            ui.spacing_mut().slider_width = (ui.available_width() - 16.0).max(100.0);
+            let r = ui.add(egui::Slider::new(&mut self.time, 0.0..=dur).show_value(false));
+            if let Some(d) = jump {
+                self.time = (self.time + d).clamp(0.0, dur);
+                self.request_frame(&ctx);
+            } else if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                self.request_frame(&ctx);
+            }
+        });
+        ui.label(&self.status);
+    }
+
+    fn picture(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let area = ui.available_rect_before_wrap();
+        let resp = ui.allocate_rect(area, Sense::click_and_drag());
+        let painter = ui.painter_at(area);
+        painter.rect_filled(area, 0.0, Color32::from_gray(24));
+        let Some(info) = self.info.clone() else {
+            painter.text(
+                area.center(),
+                egui::Align2::CENTER_CENTER,
+                "録画ファイルをここに落としてください",
+                egui::FontId::proportional(20.0),
+                Color32::GRAY,
+            );
+            return;
+        };
+        let (iw, ih) = (info.width as f32, info.height as f32);
+        if self.view.fit {
+            self.view.scale = (area.width() / iw).min(area.height() / ih);
+            self.view.center = Vec2::new(iw / 2.0, ih / 2.0);
+        }
+        // Zoom around the pointer.
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                if let Some(m) = ui.input(|i| i.pointer.hover_pos()) {
+                    let before = self.view.to_image(area, m);
+                    self.view.scale = (self.view.scale * (scroll / 600.0).exp()).clamp(0.05, 40.0);
+                    let after = self.view.to_image(area, m);
+                    self.view.center += before - after;
+                    self.view.fit = false;
+                }
+            }
+        }
+        if resp.dragged_by(PointerButton::Secondary) || resp.dragged_by(PointerButton::Middle) {
+            self.view.center -= resp.drag_delta() / self.view.scale;
+            self.view.fit = false;
+        }
+        if resp.double_clicked_by(PointerButton::Secondary) || resp.double_clicked_by(PointerButton::Middle) {
+            self.view.fit = true;
+        }
+
+        // The picture.
+        let nearest = self.view.scale >= 2.0;
+        let want_erased = self.show_erased && self.erased_rgb.is_some();
+        if self.frame_tex.is_none() || self.tex_nearest != nearest || self.tex_erased != want_erased {
+            let src = if want_erased { self.erased_rgb.as_ref() } else { self.frame_rgb.as_ref() };
+            if let Some(rgb) = src {
+                let img = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], rgb);
+                let opt = if nearest { TextureOptions::NEAREST } else { TextureOptions::LINEAR };
+                self.frame_tex = Some(ctx.load_texture("frame", img, opt));
+                self.tex_nearest = nearest;
+                self.tex_erased = want_erased;
+            }
+        }
+        let whole = self.view.rect_to_screen(area, Rect { x: 0, y: 0, w: info.width, h: info.height });
+        let uv = egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        if let Some(tex) = &self.frame_tex {
+            painter.image(tex.id(), whole, uv, Color32::WHITE);
+        }
+        // Edge presence from the detection.
+        if self.show_presence {
+            if let Some(d) = &self.detection {
+                if self.presence_tex.as_ref().is_none_or(|(s, _)| *s != self.share) {
+                    let mask = d.mask(self.share);
+                    let rgba: Vec<u8> = mask
+                        .iter()
+                        .zip(&d.presence)
+                        .flat_map(|(m, p)| if *m { [0, 255, 255, (40.0 + 100.0 * p) as u8] } else { [0, 0, 0, 0] })
+                        .collect();
+                    let img = egui::ColorImage::from_rgba_unmultiplied([d.width as usize, d.height as usize], &rgba);
+                    self.presence_tex = Some((self.share, ctx.load_texture("presence", img, TextureOptions::NEAREST)));
+                }
+                if let Some((_, tex)) = &self.presence_tex {
+                    painter.image(tex.id(), whole, uv, Color32::WHITE);
+                }
+            }
+        }
+        let cyan = Color32::from_rgb(0, 200, 255);
+        for (i, c) in self.candidates.iter().enumerate() {
+            let r = self.view.rect_to_screen(area, c.rect);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, cyan), egui::StrokeKind::Outside);
+            painter.text(r.left_bottom() + Vec2::new(0.0, 2.0), egui::Align2::LEFT_TOP, format!("{}", i + 1), egui::FontId::proportional(13.0), cyan);
+        }
+
+        // The rectangle and its handles.
+        let sr = self.view.rect_to_screen(area, self.rect);
+        let near = |p: Pos2| -> (bool, bool, bool, bool, bool) {
+            let tol = 6.0;
+            let inside_y = p.y >= sr.top() - tol && p.y <= sr.bottom() + tol;
+            let inside_x = p.x >= sr.left() - tol && p.x <= sr.right() + tol;
+            let l = inside_y && (p.x - sr.left()).abs() <= tol;
+            let r = inside_y && (p.x - sr.right()).abs() <= tol;
+            let t = inside_x && (p.y - sr.top()).abs() <= tol;
+            let b = inside_x && (p.y - sr.bottom()).abs() <= tol;
+            (l, t, r, b, sr.contains(p))
+        };
+        if let Some(p) = ui.input(|i| i.pointer.hover_pos()).filter(|_| resp.hovered() && self.drag.is_none()) {
+            let (l, t, r, b, inside) = near(p);
+            let icon = match (l || r, t || b) {
+                (true, true) if (l && t) || (r && b) => CursorIcon::ResizeNwSe,
+                (true, true) => CursorIcon::ResizeNeSw,
+                (true, false) => CursorIcon::ResizeHorizontal,
+                (false, true) => CursorIcon::ResizeVertical,
+                _ if inside => CursorIcon::Move,
+                _ => CursorIcon::Crosshair,
+            };
+            ctx.set_cursor_icon(icon);
+        }
+        if resp.drag_started_by(PointerButton::Primary) {
+            // Judge by where the button went down, not where the drag was
+            // recognised a few pixels later.
+            if let Some(p) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos()) {
+                let (l, t, r, b, inside) = near(p);
+                let ip = self.view.to_image(area, p);
+                self.drag = Some(if l || t || r || b {
+                    Drag::Resize { left: l, top: t, right: r, bottom: b, start: self.rect }
+                } else if inside {
+                    Drag::Move { from: ip, start: self.rect }
+                } else {
+                    Drag::New { anchor: ip }
+                });
+            }
+        }
+        if let (Some(d), Some(p)) = (self.drag, resp.interact_pointer_pos()) {
+            if resp.dragged_by(PointerButton::Primary) {
+                let ip = self.view.to_image(area, p);
+                let cx = |v: f32| v.round().clamp(0.0, iw) as i64;
+                let cy = |v: f32| v.round().clamp(0.0, ih) as i64;
+                let (x0, y0, x1, y1) = match d {
+                    Drag::New { anchor } => (cx(anchor.x.min(ip.x)), cy(anchor.y.min(ip.y)), cx(anchor.x.max(ip.x)), cy(anchor.y.max(ip.y))),
+                    Drag::Move { from, start } => {
+                        let dx = (ip.x - from.x).round() as i64;
+                        let dy = (ip.y - from.y).round() as i64;
+                        let x0 = (start.x as i64 + dx).clamp(0, info.width as i64 - start.w as i64);
+                        let y0 = (start.y as i64 + dy).clamp(0, info.height as i64 - start.h as i64);
+                        (x0, y0, x0 + start.w as i64, y0 + start.h as i64)
+                    }
+                    Drag::Resize { left, top, right, bottom, start } => {
+                        let (mut x0, mut y0) = (start.x as i64, start.y as i64);
+                        let (mut x1, mut y1) = ((start.x + start.w) as i64, (start.y + start.h) as i64);
+                        if left {
+                            x0 = cx(ip.x).min(x1 - 3);
+                        }
+                        if right {
+                            x1 = cx(ip.x).max(x0 + 3);
+                        }
+                        if top {
+                            y0 = cy(ip.y).min(y1 - 3);
+                        }
+                        if bottom {
+                            y1 = cy(ip.y).max(y0 + 3);
+                        }
+                        (x0, y0, x1, y1)
+                    }
+                };
+                if x1 - x0 >= 3 && y1 - y0 >= 3 {
+                    self.rect = Rect { x: x0 as u32, y: y0 as u32, w: (x1 - x0) as u32, h: (y1 - y0) as u32 };
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            self.drag = None;
+        }
+        // Arrow keys nudge the rectangle; with Shift they change its size.
+        if !ctx.egui_wants_keyboard_input() {
+            let (shift, l, r, u, d) = ui.input(|i| {
+                (
+                    i.modifiers.shift,
+                    i.key_pressed(Key::ArrowLeft),
+                    i.key_pressed(Key::ArrowRight),
+                    i.key_pressed(Key::ArrowUp),
+                    i.key_pressed(Key::ArrowDown),
+                )
+            });
+            let dx = r as i64 - l as i64;
+            let dy = d as i64 - u as i64;
+            if dx != 0 || dy != 0 {
+                let mut q = self.rect;
+                if shift {
+                    q.w = (q.w as i64 + dx).clamp(3, info.width as i64 - q.x as i64) as u32;
+                    q.h = (q.h as i64 + dy).clamp(3, info.height as i64 - q.y as i64) as u32;
+                } else {
+                    q.x = (q.x as i64 + dx).clamp(0, info.width as i64 - q.w as i64) as u32;
+                    q.y = (q.y as i64 + dy).clamp(0, info.height as i64 - q.h as i64) as u32;
+                }
+                self.rect = q;
+            }
+        }
+        let yellow = Color32::from_rgb(255, 220, 0);
+        let sr = self.view.rect_to_screen(area, self.rect);
+        painter.rect_stroke(sr, 0.0, Stroke::new(1.0, Color32::BLACK), egui::StrokeKind::Outside);
+        painter.rect_stroke(sr.expand(1.0), 0.0, Stroke::new(1.0, yellow), egui::StrokeKind::Outside);
+        for c in [sr.left_top(), sr.right_top(), sr.left_bottom(), sr.right_bottom()] {
+            painter.rect_filled(egui::Rect::from_center_size(c, Vec2::splat(6.0)), 0.0, yellow);
+        }
+        painter.text(sr.left_top() - Vec2::new(0.0, 3.0), egui::Align2::LEFT_BOTTOM, rect_text(self.rect), egui::FontId::proportional(13.0), yellow);
+        if let Some(t) = self.shown_time.filter(|t| (t - self.time).abs() > 1e-6) {
+            painter.text(
+                area.left_top() + Vec2::new(8.0, 8.0),
+                egui::Align2::LEFT_TOP,
+                format!("表示中 {}", fmt_time(t)),
+                egui::FontId::proportional(13.0),
+                Color32::GRAY,
+            );
+        }
+    }
+}
+
+/// `rgb` with the logo removed. The change that removal makes is computed in
+/// PIXEL_YC and added to ffmpeg's RGB, so no seam shows where the two colour
+/// conversions differ.
+fn erased_picture(path: &Path, info: &VideoInfo, logo: &Logo, at: f64, rgb: &[u8]) -> Result<Vec<u8>, String> {
+    if logo.x < 0 || logo.y < 0 || logo.x as u32 + logo.w as u32 > info.width || logo.y as u32 + logo.h as u32 > info.height {
+        return Err("ロゴが絵の外にあります".into());
+    }
+    let rect = Rect { x: logo.x as u32, y: logo.y as u32, w: logo.w as u32, h: logo.h as u32 };
+    let opt = ReadOptions { start: Some(at), duration: None, step: 1, threads: 2, scan: Scan::Auto };
+    let frame = Reader::open(path, info, rect, &opt)
+        .map_err(|e| e.to_string())?
+        .next_frame()
+        .map_err(|e| e.to_string())?
+        .ok_or("フレームがありません")?;
+    let hd = source::is_hd(info);
+    let before = erase::frame_to_rgb(&frame, hd);
+    let mut frame = frame;
+    erase::remove(logo, &mut frame, rect);
+    let after = erase::frame_to_rgb(&frame, hd);
+    let mut out = rgb.to_vec();
+    for r in 0..rect.h as usize {
+        for c in 0..rect.w as usize {
+            let i = (r * rect.w as usize + c) * 3;
+            let o = ((rect.y as usize + r) * info.width as usize + rect.x as usize + c) * 3;
+            for k in 0..3 {
+                let v = out[o + k] as i32 + after[i + k] as i32 - before[i + k] as i32;
+                out[o + k] = v.clamp(0, 255) as u8;
+            }
+        }
+    }
+    Ok(out)
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.poll_tasks(&ctx);
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        if !dropped.is_empty() {
+            let (lgds, videos): (Vec<PathBuf>, Vec<PathBuf>) =
+                dropped.into_iter().partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lgd")));
+            if !videos.is_empty() {
+                // Shift while dropping adds to the inputs instead of replacing them.
+                if self.inputs.is_empty() || !ctx.input(|i| i.modifiers.shift) {
+                    self.set_inputs(&ctx, videos);
+                } else {
+                    for v in videos {
+                        self.open_path(&ctx, v);
+                    }
+                }
+            }
+            for l in lgds {
+                self.load_lgd(&ctx, &l);
+            }
+        }
+        egui::Panel::right("side").default_size(380.0).min_size(300.0).show(ui, |ui| self.side_panel(ui));
+        egui::Panel::bottom("bottom").show(ui, |ui| self.bottom_panel(ui));
+        egui::CentralPanel::no_frame().show(ui, |ui| self.picture(ui));
+        if self.grab.is_some() || self.scan_task.is_some() || self.detect_task.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
+    }
+}
