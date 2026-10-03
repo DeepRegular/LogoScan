@@ -11,7 +11,12 @@ Build the `.lgd` that the transparent-logo filter removes, straight from a recor
 
 English ・ [日本語](README.ja.md)
 
+<img src="docs/screenshot.png" width="900"
+     alt="The LogoScan window: a test picture with a box around the logo, which is shown removed; on the right, the detected candidates, the analysis settings, and the extracted logo's opacity as a black-and-white image">
+
 </div>
+
+<sub>A test clip with a made-up logo, after finding and analysing it. The extracted opacity is at the bottom right; inside the yellow box the picture is shown with the logo removed.</sub>
 
 LogoScan writes the same `.lgd` files as the logo analysis plugin for AviUtl (logoscan),
 so the transparent-logo filter (delogo) and every other tool that reads `.lgd` can use them as they are.

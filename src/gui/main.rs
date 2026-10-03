@@ -563,9 +563,9 @@ impl App {
                 if changed {
                     self.refresh_candidates(false);
                 }
-                ui.checkbox(&mut self.show_presence, "検出した縁を重ねて表示");
+                ui.checkbox(&mut self.show_presence, "検出結果を重ねて表示");
                 let mut pick = None;
-                for (i, c) in self.candidates.iter().enumerate() {
+                for (i, c) in self.candidates.iter().enumerate().take(5) {
                     let text = format!("{}.  {}   （縁 {} 画素）", i + 1, rect_text(c.rect), c.pixels);
                     if ui.selectable_label(same_rect(c.rect, self.rect), text).clicked() {
                         pick = Some(c.rect);
@@ -649,8 +649,9 @@ impl App {
             ui.separator();
             ui.heading("結果");
             if let (Some(logo), Some(tex)) = (&self.logo, &self.logo_tex) {
-                let w = ui.available_width().min(logo.w as f32 * 3.0);
-                let h = w * logo.h as f32 / logo.w as f32;
+                // Two screen points per pixel at most, and no taller than 120.
+                let scale = (ui.available_width() / logo.w as f32).min(120.0 / logo.h as f32).min(2.0);
+                let (w, h) = (logo.w as f32 * scale, logo.h as f32 * scale);
                 ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::new(w, h)));
                 let lr = Rect { x: logo.x as u32, y: logo.y as u32, w: logo.w as u32, h: logo.h as u32 };
                 let peak = logo.pixels.iter().map(|p| p.dp_y).max().unwrap_or(0);
@@ -805,7 +806,7 @@ impl App {
             }
         }
         let cyan = Color32::from_rgb(0, 200, 255);
-        for (i, c) in self.candidates.iter().enumerate() {
+        for (i, c) in self.candidates.iter().enumerate().take(5).filter(|_| self.show_presence) {
             let r = self.view.rect_to_screen(area, c.rect);
             painter.rect_stroke(r, 0.0, Stroke::new(1.0, cyan), egui::StrokeKind::Outside);
             painter.text(r.left_bottom() + Vec2::new(0.0, 2.0), egui::Align2::LEFT_TOP, format!("{}", i + 1), egui::FontId::proportional(13.0), cyan);
