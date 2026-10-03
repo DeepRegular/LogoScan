@@ -17,7 +17,18 @@ AviUtl のロゴ解析プラグイン（logoscan）と同じ形式の `.lgd` を
 作った `.lgd` は透過性ロゴフィルタ（delogo）でそのまま読めます。
 画面（`lgdscan-gui`）とコマンド（`lgdscan`）の 2 つがあり、中身は同じです。
 
-映像は ffmpeg / ffprobe コマンドで読みます。PATH に入れておいてください。
+映像は ffmpeg / ffprobe コマンドで読みます。
+
+## ダウンロード
+
+[Releases](https://github.com/DeepRegular/LogoScan/releases) から取ってください。
+
+- **Windows**: `LogoScan-<版>-windows-x86_64.zip` を好きな場所に展開して、`lgdscan-gui.exe` を起動します。
+  FFmpeg は `ffmpeg` フォルダーに同梱しています。
+- **Linux**: `LogoScan-<版>-linux-x86_64.tar.gz` です。Ubuntu 22.04 以降など、glibc 2.35 以上で動きます。
+  FFmpeg はディストリビューションのものを入れてください（`sudo apt install ffmpeg`）。
+
+ffmpeg と ffprobe は、プログラムと同じフォルダー、その中の `ffmpeg` フォルダー、PATH の順に探します。
 
 ## 画面（lgdscan-gui）
 
@@ -134,3 +145,6 @@ cargo build --release
 ## ライセンス
 
 [GPL-3.0](LICENSE)。
+
+Windows 版には [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) の FFmpeg を同梱しています。
+FFmpeg も GPL です。ライセンスは `ffmpeg/LICENSE.txt` に、ソースは [ffmpeg.org](https://ffmpeg.org/download.html) にあります。

@@ -7,7 +7,7 @@
 //! candidates (letters close together form one logo).
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -100,7 +100,7 @@ pub fn measure(
 
 /// The first keyframe at or after `at`, luma only.
 fn grab_key_luma(path: &Path, w: usize, h: usize, at: f64) -> Option<Vec<u8>> {
-    let out = Command::new("ffmpeg")
+    let out = crate::source::tool("ffmpeg")
         .args(["-hide_banner", "-loglevel", "quiet", "-nostdin", "-threads", "2"])
         .args(["-skip_frame", "nokey", "-noaccurate_seek", "-ss", &format!("{at:.3}")])
         .arg("-i")

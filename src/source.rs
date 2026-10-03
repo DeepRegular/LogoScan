@@ -11,6 +11,24 @@ use std::io::{self, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
+/// A command for `ffmpeg` or `ffprobe`: a copy next to our own executable or
+/// in an `ffmpeg` folder beside it (as the Windows package ships it), else
+/// whatever PATH finds. On Windows it never opens a console window.
+pub fn tool(name: &str) -> Command {
+    let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+    let beside = dir.and_then(|d| [d.join(&exe), d.join("ffmpeg").join(&exe)].into_iter().find(|p| p.is_file()));
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(beside.unwrap_or_else(|| exe.into()));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
     pub x: u32,
@@ -31,7 +49,7 @@ pub struct VideoInfo {
 }
 
 pub fn probe(path: &Path) -> io::Result<VideoInfo> {
-    let out = Command::new("ffprobe")
+    let out = tool("ffprobe")
         .args([
             "-v",
             "error",
@@ -43,7 +61,8 @@ pub fn probe(path: &Path) -> io::Result<VideoInfo> {
             "default=nw=1",
         ])
         .arg(path)
-        .output()?;
+        .output()
+        .map_err(|e| io::Error::other(format!("cannot run ffprobe (put ffmpeg and ffprobe on PATH or next to this program): {e}")))?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut info = VideoInfo { width: 0, height: 0, frame_rate: 0.0, duration: 0.0, pix_fmt: String::new(), interlaced: false };
     let rate = |s: &str| -> f64 {
@@ -88,7 +107,7 @@ pub fn is_hd(info: &VideoInfo) -> bool {
 /// One whole frame at `at` seconds as packed RGB, for display.
 pub fn grab_rgb(path: &Path, info: &VideoInfo, at: f64) -> io::Result<Vec<u8>> {
     let matrix = if is_hd(info) { "bt709" } else { "bt601" };
-    let out = Command::new("ffmpeg")
+    let out = tool("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
         .args(seek_args(at))
         .arg("-i")
@@ -194,7 +213,7 @@ impl Reader {
         if opt.step > 1 {
             vf = format!("select='not(mod(n\\,{}))',{vf}", opt.step);
         }
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = tool("ffmpeg");
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         cmd.args(["-threads", &opt.threads.to_string()]);
         if let Some(s) = opt.start {

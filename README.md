@@ -17,7 +17,19 @@ LogoScan writes the same `.lgd` files as the logo analysis plugin for AviUtl (lo
 so the transparent-logo filter (delogo) and every other tool that reads `.lgd` can use them as they are.
 It comes as a window (`lgdscan-gui`, labelled in Japanese) and as a command (`lgdscan`) that share the same engine.
 
-Video is read through the `ffmpeg` and `ffprobe` commands, which must be on `PATH`.
+Video is read through the `ffmpeg` and `ffprobe` commands.
+
+## Download
+
+From [Releases](https://github.com/DeepRegular/LogoScan/releases):
+
+- **Windows** — `LogoScan-<version>-windows-x86_64.zip`. Unpack it anywhere and run `lgdscan-gui.exe`.
+  FFmpeg comes with it, in the `ffmpeg` folder.
+- **Linux** — `LogoScan-<version>-linux-x86_64.tar.gz`, for Ubuntu 22.04 or later and the like
+  (glibc 2.35). Install FFmpeg from your distribution (`sudo apt install ffmpeg`).
+
+`ffmpeg` and `ffprobe` are looked for next to the program, then in an `ffmpeg` folder beside it,
+then on `PATH`.
 
 ## The window
 
@@ -140,3 +152,6 @@ For Japanese text the window uses a system font: Noto Sans CJK, IPA Gothic, Yu G
 ## License
 
 [GPL-3.0](LICENSE).
+
+The Windows package includes an FFmpeg build from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)
+(GPL; its licence is in `ffmpeg/LICENSE.txt`, and the sources are at [ffmpeg.org](https://ffmpeg.org/download.html)).
