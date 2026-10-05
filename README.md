@@ -125,9 +125,13 @@ The animation plays the same way every time, so one logo per frame of it removes
 lgdscan anim rec1.ts rec2.ts rec3.ts … --rect 0,0,704,320 -o anim.ldp --still settled.lgd
 ```
 
-Give it many recordings that each show the animation and the still logo after it; the first ten seconds or so
-of each programme are enough. Three will do in principle, but bring a few dozen: with a dozen or so the still logo cannot be fitted and
-the last frames fall apart (a warning says so).
+How to use it:
+
+1. Gather many recordings from the same channel; one alone cannot be analysed. About thirty give a steady
+   result (with a dozen or so the last frames cannot be worked out well, and a warning says so).
+2. Cut each recording from a little before the logo animation starts to after the logo has gone from the
+   picture (ten seconds or so).
+3. Give the area the logo moves about in with `--rect`, all of it inside (in the window, draw the box).
 
 - `--rect` is the area the whole animation plays in. Memory grows with it: 704×320 over 72 recordings takes
   about 1.3 GB and three minutes or so.
