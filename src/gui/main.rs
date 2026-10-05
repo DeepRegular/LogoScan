@@ -13,8 +13,7 @@ use lgdscan::erase;
 use lgdscan::job::{self, Job, Outcome};
 use lgdscan::lgd::{self, Logo};
 use lgdscan::scan::Background;
-use lgdscan::scproj;
-use lgdscan::source::{self, Input, ReadOptions, Reader, Rect, Scan, VideoInfo};
+use lgdscan::source::{self, ReadOptions, Reader, Rect, Scan, VideoInfo};
 
 fn main() -> eframe::Result {
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
@@ -118,9 +117,8 @@ struct Anim {
     logos: Vec<Logo>,
     /// The logo the animation settles into, when it was analysed here.
     still: Option<Logo>,
-    /// Per input: where the animation starts, in frames from where it was
-    /// read (its stretch, narrowed by `start`).
-    starts: Vec<(Input, i64)>,
+    /// Per input: where the animation starts, in frames from `start`.
+    starts: Vec<(PathBuf, i64)>,
     /// What the frames were counted from (the range, when one was set).
     start: Option<f64>,
     /// Recordings each frame was fitted on.
@@ -166,7 +164,7 @@ impl View {
 }
 
 struct App {
-    inputs: Vec<Input>,
+    inputs: Vec<PathBuf>,
     info: Option<VideoInfo>,
     status: String,
 
@@ -289,35 +287,16 @@ impl App {
             self.load_lgd(ctx, &path);
             return;
         }
-        let new = match scproj::expand(&[path]) {
-            Ok(v) => v,
-            Err(e) => {
-                self.status = e;
-                return;
-            }
-        };
         if self.inputs.is_empty() {
-            self.set_inputs(ctx, new);
-        } else {
-            for i in new {
-                if !self.inputs.contains(&i) {
-                    self.inputs.push(i);
-                }
-            }
+            self.set_inputs(ctx, vec![path]);
+        } else if !self.inputs.contains(&path) {
+            self.inputs.push(path);
         }
     }
 
-    /// Opens the files given in place of the inputs, projects expanded.
-    fn open_paths(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
-        match scproj::expand(&paths) {
-            Ok(v) => self.set_inputs(ctx, v),
-            Err(e) => self.status = e,
-        }
-    }
-
-    fn set_inputs(&mut self, ctx: &egui::Context, inputs: Vec<Input>) {
+    fn set_inputs(&mut self, ctx: &egui::Context, inputs: Vec<PathBuf>) {
         let Some(first) = inputs.first() else { return };
-        match source::probe(&first.path) {
+        match source::probe(first) {
             Ok(info) => {
                 self.status = format!(
                     "{}×{}  {:.3} fps  {}  {}",
@@ -327,11 +306,7 @@ impl App {
                     fmt_time(info.duration),
                     if info.interlaced { "インターレース" } else { "プログレッシブ" }
                 );
-                // A stretch from a project: look at its middle.
-                self.time = match first.span {
-                    Some((a, b)) => (a + b.min(info.duration.max(a))) / 2.0,
-                    None => (info.duration / 2.0).max(0.0),
-                };
+                self.time = (info.duration / 2.0).max(0.0);
                 self.range = (0.0, info.duration);
                 if self.rect.w == 0 || self.rect.x + self.rect.w > info.width || self.rect.y + self.rect.h > info.height {
                     self.rect = Rect { x: info.width * 3 / 4, y: info.height / 20, w: info.width / 6, h: info.height / 12 };
@@ -403,9 +378,8 @@ impl App {
         if self.anim_preview {
             let info = self.preview_info();
             if let (Some(a), Some(info)) = (&self.anim, info) {
-                if let Some((inp, s)) = a.starts.get(a.input) {
-                    let start = inp.window(a.start, None).and_then(|w| w.0);
-                    let (path, k, input) = (inp.path.clone(), a.k, a.input);
+                if let Some((path, s)) = a.starts.get(a.input) {
+                    let (path, k, input, start) = (path.clone(), a.k, a.input, a.start);
                     let n = (s + k as i64).max(0) as u64;
                     let logo = if self.show_erased { a.logos.get(k).cloned() } else { None };
                     let at = self.time;
@@ -418,7 +392,7 @@ impl App {
                 }
             }
         }
-        let (Some(path), Some(info)) = (self.inputs.first().map(|i| i.path.clone()), self.info.clone()) else { return };
+        let (Some(path), Some(info)) = (self.inputs.first().cloned(), self.info.clone()) else { return };
         let at = self.time;
         let logo = if self.show_erased { self.logo.clone() } else { None };
         self.grab = Some(Task::spawn(ctx, move |_, _| {
@@ -678,22 +652,23 @@ impl App {
             ui.label("録画ごとの開始フレーム（選ぶとその録画で見られます）");
             egui::ScrollArea::vertical().id_salt("starts").max_height(140.0).show(ui, |ui| {
                 for (i, (p, st)) in a.starts.iter().enumerate() {
-                    if ui.selectable_label(i == a.input, format!("{st:6}  {}", p.label())).clicked() {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if ui.selectable_label(i == a.input, format!("{st:6}  {name}")).clicked() {
                         a.input = i;
                         changed = true;
                     }
                 }
             });
             let (p, st) = &a.starts[a.input.min(a.starts.len() - 1)];
+            let file = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let ldp = if self.name.is_empty() { "anim.ldp".to_string() } else { format!("{}.ldp", self.name) };
             let call = match a.hold {
                 Some(h) => format!("EraseLogomod(logofile=\"{ldp}\", start={st}, end={st}+{}, fadeout={})", h.end, h.fadeout),
                 None => format!("EraseLogomod(logofile=\"{ldp}\", start={st})"),
             };
-            let from = if p.span.is_some() { "（フレーム番号は切り出した区間の頭から）" } else { "" };
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&call).monospace().small());
-                if ui.small_button("コピー").on_hover_text(format!("{} での呼び方{from}", p.label())).clicked() {
+                if ui.small_button("コピー").on_hover_text(format!("{file} での呼び方")).clicked() {
                     ctx.copy_text(call.clone());
                 }
             });
@@ -753,7 +728,7 @@ impl App {
     }
 
     fn start_detect(&mut self, ctx: &egui::Context) {
-        let (Some(path), Some(info)) = (self.inputs.first().map(|i| i.path.clone()), self.info.clone()) else { return };
+        let (Some(path), Some(info)) = (self.inputs.first().cloned(), self.info.clone()) else { return };
         let (start, end) = if self.range_on { (Some(self.range.0), Some(self.range.1)) } else { (None, None) };
         self.detect_task = Some(Task::spawn(ctx, move |cancel, report| {
             let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
@@ -830,11 +805,10 @@ impl App {
                 if ui.button("開く…").clicked() {
                     if let Some(files) = rfd::FileDialog::new()
                         .add_filter("動画", &["ts", "m2ts", "mts", "mp4", "mkv", "mpg", "m2v"])
-                        .add_filter("SmartCut のプロジェクト", &["scproj"])
                         .add_filter("すべて", &["*"])
                         .pick_files()
                     {
-                        self.open_paths(&ctx, files);
+                        self.set_inputs(&ctx, files);
                     }
                 }
                 if ui
@@ -866,7 +840,8 @@ impl App {
                         if i > 0 && ui.small_button("×").clicked() {
                             remove = Some(i);
                         }
-                        ui.add(egui::Label::new(p.label()).truncate()).on_hover_text(p.path.display().to_string());
+                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        ui.add(egui::Label::new(name).truncate()).on_hover_text(p.display().to_string());
                     });
                 }
             });
@@ -1114,7 +1089,7 @@ impl App {
         if let Some(v) = a.infos.get(&i) {
             return Some(v.clone());
         }
-        let info = source::probe(&a.starts.get(i)?.0.path).ok()?;
+        let info = source::probe(&a.starts.get(i)?.0).ok()?;
         a.infos.insert(i, info.clone());
         Some(info)
     }
@@ -1367,7 +1342,7 @@ impl App {
                 painter.rect_stroke(lr, 0.0, Stroke::new(1.0, Color32::from_rgb(255, 120, 60)), egui::StrokeKind::Outside);
                 let text = match self.shown_frame {
                     Some((i, n)) => {
-                        let name = a.starts.get(i).map(|(p, _)| p.label()).unwrap_or_default();
+                        let name = a.starts.get(i).and_then(|(p, _)| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         format!("アニメーションの {} フレーム目（{name} の {n} フレーム目）", a.k)
                     }
                     None => "読み込んでいます…".into(),
@@ -1458,7 +1433,7 @@ impl eframe::App for App {
             if !videos.is_empty() {
                 // Shift while dropping adds to the inputs instead of replacing them.
                 if self.inputs.is_empty() || !ctx.input(|i| i.modifiers.shift) {
-                    self.open_paths(&ctx, videos);
+                    self.set_inputs(&ctx, videos);
                 } else {
                     for v in videos {
                         self.open_path(&ctx, v);

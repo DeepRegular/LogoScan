@@ -17,22 +17,22 @@
 //!    has settled with the still logo removed, whichever still matches the
 //!    frame around the logo.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::lgd::{self, LogoPixel, LOGO_MAX_DP};
 use crate::scan::{self, Background, Params, Scanner};
-use crate::source::{self, Frame, Input, ReadOptions, Reader, Rect, Scan, VideoInfo};
+use crate::source::{self, Frame, ReadOptions, Reader, Rect, Scan, VideoInfo};
 
 /// Low-resolution grid used for alignment: one cell per 8x8 pixels.
 const CELL: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct AnimJob {
-    pub inputs: Vec<Input>,
+    pub inputs: Vec<PathBuf>,
     /// The area the whole animation plays in.
     pub rect: Rect,
-    /// A range read from every input (within its own stretch, if it has one).
     pub start: Option<f64>,
     pub end: Option<f64>,
     /// Largest shift tried between two recordings, in frames.
@@ -42,7 +42,7 @@ pub struct AnimJob {
 }
 
 impl AnimJob {
-    pub fn new(inputs: Vec<Input>, rect: Rect) -> AnimJob {
+    pub fn new(inputs: Vec<PathBuf>, rect: Rect) -> AnimJob {
         AnimJob {
             inputs,
             rect,
@@ -54,32 +54,29 @@ impl AnimJob {
         }
     }
 
-    /// How to read one input; None when it has nothing in the range.
-    fn read_options(&self, input: &Input) -> Option<ReadOptions> {
-        let (start, end) = input.window(self.start, self.end)?;
-        Some(ReadOptions {
-            start,
-            duration: end.map(|e| e - start.unwrap_or(0.0)),
+    fn read_options(&self) -> ReadOptions {
+        ReadOptions {
+            start: self.start,
+            duration: self.end.map(|e| e - self.start.unwrap_or(0.0)),
             step: 1,
             threads: 4,
             scan: self.scan,
-        })
+        }
     }
 }
 
-struct Opened {
-    path: std::path::PathBuf,
+struct Input {
+    path: PathBuf,
     info: VideoInfo,
-    opt: ReadOptions,
 }
 
 /// Runs `each` on every input, a few at a time; ffmpeg decodes with
 /// several threads of its own.
 fn for_inputs<T: Send>(
-    inputs: &[Opened],
+    inputs: &[Input],
     threads: usize,
     cancel: &AtomicBool,
-    each: &(dyn Fn(usize, &Opened) -> Result<T, String> + Sync),
+    each: &(dyn Fn(usize, &Input) -> Result<T, String> + Sync),
 ) -> Result<Vec<T>, String> {
     let next = AtomicUsize::new(0);
     let out: Mutex<Vec<Option<Result<T, String>>>> = Mutex::new((0..inputs.len()).map(|_| None).collect());
@@ -102,8 +99,8 @@ fn for_inputs<T: Send>(
 }
 
 /// Hands every frame to `each` until it returns false.
-fn read_all(input: &Opened, rect: Rect, mut each: impl FnMut(usize, Frame) -> bool) -> Result<usize, String> {
-    let mut rd = Reader::open(&input.path, &input.info, rect, &input.opt).map_err(|e| format!("{}: {e}", input.path.display()))?;
+fn read_all(input: &Input, rect: Rect, opt: &ReadOptions, mut each: impl FnMut(usize, Frame) -> bool) -> Result<usize, String> {
+    let mut rd = Reader::open(&input.path, &input.info, rect, opt).map_err(|e| format!("{}: {e}", input.path.display()))?;
     let mut n = 0;
     while let Some(f) = rd.next_frame().map_err(|e| format!("{}: {e}", input.path.display()))? {
         let go = each(n, f);
@@ -783,16 +780,13 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
             job.inputs.len()
         ));
     }
-    let inputs: Vec<Opened> = job
+    let inputs: Vec<Input> = job
         .inputs
         .iter()
-        .map(|i| {
-            let opt = job.read_options(i).ok_or_else(|| format!("{}: 範囲に入るところがありません", i.label()))?;
-            let info = source::probe(&i.path).map_err(|e| format!("{}: {e}", i.path.display()))?;
-            Ok(Opened { path: i.path.clone(), info, opt })
-        })
-        .collect::<Result<_, String>>()?;
+        .map(|p| source::probe(p).map(|info| Input { path: p.clone(), info }).map_err(|e| format!("{}: {e}", p.display())))
+        .collect::<Result<_, _>>()?;
     let (w, h) = (r.w as usize, r.h as usize);
+    let opt = job.read_options();
     let total = inputs.len();
     let done = AtomicUsize::new(0);
     let tick = |stage: Stage| {
@@ -808,7 +802,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
     begin(Stage::Align);
     let lo = for_inputs(&inputs, job.threads, cancel, &|_, input| {
         let mut v = Vec::new();
-        read_all(input, r, |_, f| {
+        read_all(input, r, &opt, |_, f| {
             v.push(cells(&f.y, w, h));
             true
         })?;
@@ -836,7 +830,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
         let mut count = vec![0u16; w * h];
         let mut frames = 0u32;
         let mut luma = vec![0u8; w * h];
-        read_all(input, r, |f, fr| {
+        read_all(input, r, &opt, |f, fr| {
             let t = f as i64 - off[c];
             if t >= still_from && (t - still_from) % 4 == 0 {
                 for (o, v) in luma.iter_mut().zip(&fr.y) {
@@ -892,7 +886,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
     let scanner = Mutex::new(Scanner::new(still_rect.w as usize, still_rect.h as usize, params));
     for_inputs(&inputs, job.threads, cancel, &|c, input| {
         let mut mine = Vec::new();
-        read_all(input, r, |f, fr| {
+        read_all(input, r, &opt, |f, fr| {
             if f as i64 - off[c] >= still_from {
                 mine.push(crop(&fr, w, still_rect));
             }
@@ -961,7 +955,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
             // The frames this recording contributes, by aligned time.
             let want = |t: i64| (pre[0]..=k1).contains(&t) || post.contains(&t);
             let mut got: Vec<(i64, Frame)> = Vec::new();
-            read_all(input, r, |f, fr| {
+            read_all(input, r, &opt, |f, fr| {
                 let t = f as i64 - off[c];
                 if want(t) {
                     got.push((t, fr));
@@ -1231,7 +1225,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
         let band = edge_band(&still);
         let depths = for_inputs(&inputs, job.threads, cancel, &|c, input| {
             let mut v = Vec::new();
-            read_all(input, srect, |f, fr| {
+            read_all(input, srect, &opt, |f, fr| {
                 let t = f as i64 - off[c];
                 if t > rest {
                     v.push((t - a0, depth(&still, &fr.y, &band)));

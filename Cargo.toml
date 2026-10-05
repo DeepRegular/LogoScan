@@ -10,7 +10,6 @@ repository = "https://github.com/DeepRegular/LogoScan"
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 rfd = "0.17"
 encoding_rs = "0.8"
-serde_json = "1"
 
 [[bin]]
 name = "lgdscan"

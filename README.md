@@ -43,7 +43,6 @@ lgdscan-gui recording.ts [logo.lgd]
 ```
 
 Recordings can also be dropped on the window (hold Shift to add to the inputs instead of replacing them).
-A SmartCut project (.scproj) opens too: each range it keeps is listed as a recording of its own.
 
 1. **Find the logo.** 120 keyframes spread over the recording are read and the box is placed on the most
    logo-like spot. Other candidates are listed; moving *edge share* or *margin* recomputes them on the spot.
@@ -71,10 +70,6 @@ lgdscan scan recording.ts --rect 1700,34,157,45 -o logo.lgd -n MyLogo
 `--rect` is X,Y,width,height. Leave a little space around the logo: the outermost one-pixel ring of the box
 is read as background, so the logo must not touch it. Any number of inputs may be given; more of them give
 the background a wider range of colours and a steadier result.
-
-An input may also be a SmartCut project (.scproj): each range it keeps is read as an input of its own, so a
-project with the commercials cut out gives a logo from the programme alone. With `--start` / `--end`, only
-the part of each range inside them is read.
 
 | Option | Default | |
 |---|---|---|
@@ -138,10 +133,6 @@ How to use it:
    picture (ten seconds or so).
 3. Give the area the logo moves about in with `--rect`, all of it inside (in the window, draw the box).
 
-If the stretches are marked in SmartCut, give the project (.scproj) itself rather than writing them out: each range
-it keeps is read as one recording. Written-out recordings have their first GOP encoded again, so reading the
-originals is a touch more accurate.
-
 - `--rect` is the area the whole animation plays in. Memory grows with it: 704×320 over 72 recordings takes
   about 1.3 GB and three minutes or so.
 - The file is written in the .lgd format with one logo per frame, named `0`, `1`, `2`… in order. Each frame's
@@ -166,7 +157,7 @@ is found; delogomod's fade (a straight ramp down over the last `fadeout` frames 
 middle value over all recordings. On the 72 recordings here the depth stays at 0.99 up to frame 209 and falls to
 nothing at 234. The example that comes with delogomod (`end=start+218, fadeout=28`) would start fading these
 while the logo is still at full strength. Recordings that stop before the logo is gone give no `end` and
-`fadeout` (a warning says so). lgdscan counts frames from the first one it decodes (for a .scproj, the first of the stretch); depending on how AviSynth opens the
+`fadeout` (a warning says so). lgdscan counts frames from the first one it decodes; depending on how AviSynth opens the
 file, the count may start a frame or two apart, so check the result.
 
 ### Sample scripts

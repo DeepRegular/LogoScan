@@ -8,7 +8,7 @@
 //! interpolated within each field for interlaced material.
 
 use std::io::{self, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 /// A command for `ffmpeg` or `ffprobe`: a copy next to our own executable or
@@ -29,70 +29,6 @@ pub fn tool(name: &str) -> Command {
     cmd
 }
 
-/// A recording to read: the whole file, or one stretch of it (a range kept
-/// in a SmartCut project), in seconds from the start of the file.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Input {
-    pub path: PathBuf,
-    /// From and to; the end is infinite for "to the end of the file".
-    pub span: Option<(f64, f64)>,
-}
-
-impl Input {
-    pub fn whole(path: PathBuf) -> Input {
-        Input { path, span: None }
-    }
-
-    /// Where to start and stop reading: this input's stretch narrowed by a
-    /// range set for every input. None when the two do not meet.
-    pub fn window(&self, start: Option<f64>, end: Option<f64>) -> Option<(Option<f64>, Option<f64>)> {
-        let Some((a, b)) = self.span else { return Some((start, end)) };
-        let s = start.map_or(a, |s| s.max(a));
-        let e = end.map_or(b, |e| e.min(b));
-        if e <= s {
-            return None;
-        }
-        Some((Some(s), e.is_finite().then_some(e)))
-    }
-
-    /// The file name, after the stretch when there is one (file names of
-    /// recordings are long, and the stretch tells apart those of one file).
-    pub fn label(&self) -> String {
-        let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        match self.span {
-            Some((a, b)) if b.is_finite() => format!("[{a:.3}–{b:.3}]  {name}"),
-            Some((a, _)) => format!("[{a:.3}–]  {name}"),
-            None => name,
-        }
-    }
-}
-
-/// Seconds from the start of the file to the first picture a decoder can
-/// start on (the first key frame), as SmartCut counts its ranges from it.
-pub fn first_point(path: &Path) -> f64 {
-    let out = tool("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#600"])
-        .args(["-show_entries", "packet=pts_time,flags:format=start_time", "-of", "default=nw=1"])
-        .arg(path)
-        .output();
-    let Ok(out) = out else { return 0.0 };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (mut start, mut first, mut pts) = (None, None, None);
-    for line in text.lines() {
-        let Some((k, v)) = line.split_once('=') else { continue };
-        match k {
-            "pts_time" => pts = v.parse::<f64>().ok(),
-            "flags" if first.is_none() && v.starts_with('K') => first = pts,
-            "start_time" => start = v.parse::<f64>().ok(),
-            _ => {}
-        }
-    }
-    match (first, start) {
-        (Some(f), Some(s)) => (f - s).max(0.0),
-        _ => 0.0,
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
     pub x: u32,
@@ -109,7 +45,7 @@ pub struct VideoInfo {
     /// Seconds; 0 when the container does not say.
     pub duration: f64,
     /// The container's start time in seconds: what every time given here
-    /// (and in SmartCut) is counted from.
+    /// is counted from.
     pub start_time: f64,
     pub pix_fmt: String,
     pub interlaced: bool,
@@ -166,11 +102,11 @@ const PRE_ROLL: f64 = 2.0;
 /// filter to put first in the chain, and options after the input.
 ///
 /// Frames are picked by their own timestamps, kept as they are in the file
-/// (-copyts), less the container's start time: the clock SmartCut counts on.
-/// ffmpeg's -ss after the input does not keep to it: near the beginning of a
-/// broadcast recording the seek before the input is dropped and the frames
-/// come out up to a second early, and elsewhere still some frames early.
-/// trim, unlike select, also ends the decoding at the end of the stretch.
+/// (-copyts), less the container's start time. ffmpeg's -ss after the input
+/// does not keep to that clock: near the beginning of a broadcast recording
+/// the seek before the input is dropped and the frames come out up to a
+/// second early, and elsewhere still some frames early. trim, unlike
+/// select, also ends the decoding at the end of the range.
 fn window_args(info: &VideoInfo, start: Option<f64>, duration: Option<f64>) -> (Vec<String>, Option<String>, Vec<String>) {
     // Half a millisecond early, so a frame exactly on the edge counts.
     const EDGE: f64 = 0.0005;
