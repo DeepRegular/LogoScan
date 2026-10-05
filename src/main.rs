@@ -236,8 +236,10 @@ fn cmd_anim(args: &[String]) -> Res {
             eprint!("\r  {what}: {}/{}          ", p.done, p.total);
         },
         &AtomicBool::new(false),
-    )?;
+    );
+    // End the progress line before anything else, an error included.
     eprintln!();
+    let out = out?;
     for (input, s) in inputs.iter().zip(&out.starts) {
         eprintln!("  starts at frame {s:5}  {}", input.display());
     }

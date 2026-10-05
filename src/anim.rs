@@ -772,10 +772,13 @@ fn mismatch(f: &Frame, bg: &Planes) -> f32 {
 pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &AtomicBool) -> Result<AnimOutcome, String> {
     let r = job.rect;
     if r.w < 16 || r.h < 16 {
-        return Err("範囲が小さすぎます".into());
+        return Err("枠が小さすぎます。ロゴが動き回る範囲が全部入るように囲んでください".into());
     }
     if job.inputs.len() < 3 {
-        return Err("動くロゴには録画が 3 本以上要ります（多いほど正確です）".into());
+        return Err(format!(
+            "録画が {} 本しかありません。動くロゴの解析には、同じ局の録画が 3 本以上要ります（30 本ほどあると安定します）",
+            job.inputs.len()
+        ));
     }
     let inputs: Vec<Input> = job
         .inputs
@@ -808,7 +811,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
     })?;
     let al = align(&lo, job.search);
     drop(lo);
-    let (on, settled) = active_span(&al).ok_or("録画どうしで揃って動くものが見つかりません")?;
+    let (on, settled) = active_span(&al).ok_or("どの録画でも同じように動くものが、枠の中に見つかりません。枠がロゴの動く範囲を囲んでいるか、どの録画にもロゴのアニメーションが入っているかを確かめてください")?;
     let off = &al.offsets;
     // Frames fitted: a few before the rise (the first frames may be faint)
     // to well after the fall, which the shared changes place only roughly;
@@ -850,24 +853,26 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
         frames += f;
     }
     if frames < 8 {
-        return Err("アニメーションのあとのフレームが足りません（静止したロゴが映っている部分も含めてください）".into());
+        return Err("ロゴの動きが止まったあとの部分が、録画にほとんど入っていません。ロゴが画面から消えるまでを切り出してください".into());
     }
-    let det = crate::detect::Detection {
-        width: r.w,
-        height: r.h,
-        frames,
-        presence: count.iter().map(|c| *c as f32 / frames as f32).collect(),
-    };
-    let cands = det.candidates(0.45, 3);
-    let still_rect = cands
-        .iter()
-        .map(|c| c.rect)
-        .reduce(|a, b| {
-            let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
-            let (x1, y1) = ((a.x + a.w).max(b.x + b.w), (a.y + a.h).max(b.y + b.h));
-            Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
-        })
-        .ok_or("アニメーションのあとに静止したロゴが見つかりません")?;
+    // Edges there in most frames after the animation. Unlike `detect` on a
+    // whole picture, nothing is dropped for being large or near the edge of
+    // the area: the box drawn round a moving logo may be little larger than
+    // the logo it settles into.
+    let steady: Vec<bool> = count.iter().map(|c| *c as f32 >= frames as f32 * 0.45).collect();
+    let steady = drop_specks(&steady, w, h, 20);
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, _) in steady.iter().enumerate().filter(|(_, s)| **s) {
+        x0 = x0.min(i % w);
+        y0 = y0.min(i / w);
+        x1 = x1.max(i % w);
+        y1 = y1.max(i / w);
+    }
+    if x0 == usize::MAX {
+        return Err("ロゴの動きが止まったあと、枠の中にロゴが見つかりません。枠がロゴの止まる位置まで囲んでいるか、録画にロゴが画面から消えるまでが入っているかを確かめてください".into());
+    }
+    let tight = Rect { x: x0 as u32, y: y0 as u32, w: (x1 + 1 - x0) as u32, h: (y1 + 1 - y0) as u32 };
+    let still_rect = crate::detect::grow(tight, 3, r.w, r.h);
 
     // 3. The still logo, with the ordinary scanner.
     begin(Stage::Still);
@@ -896,7 +901,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
     })?;
     let report = scanner.into_inner().unwrap().finish(job.threads);
     if report.frames_used < 2 {
-        return Err("静止したロゴの背景が一度も平らになりません".into());
+        return Err("動きが止まったあとのロゴを求められません（ロゴのまわりの背景が、どの録画でも模様や動きのある絵でした）。録画を増やしてください".into());
     }
     let still = lgd::Logo {
         x: still_rect.x as i16,
@@ -914,7 +919,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
     let still_ok = report.frames_used >= STILL_FRAMES && mean_dp > 0.0;
     if !still_ok {
         warnings.push(format!(
-            "止まったロゴを当てはめられたフレームが {} しかありません。終わりのほうのフレームは、アニメーション直前の絵だけから求めています（録画を増やすと良くなります）",
+            "動きが止まったあとのロゴを求めるのに使えた絵が {} 枚しかなく、当てになりません。そのため終わりのほうのフレームは、アニメーション直前の絵だけから求めました。録画を増やすと良くなります（30 本ほど）",
             report.frames_used
         ));
     }
@@ -1201,15 +1206,13 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
         .find(|&k| {
             frames[k].shown >= MIN_SHOWN.max(typical / 4) && frames.get(k + 1).is_none_or(|next| overlap(&frames[k], next) >= 0.5)
         })
-        .ok_or("アニメーションのロゴを取り出せませんでした")?;
+        .ok_or("ロゴのアニメーションを取り出せませんでした。枠と録画を確かめてください")?;
     let last = settle.unwrap_or(frames.len() - 1).clamp(first, frames.len() - 1);
     let frames: Vec<AnimFrame> = frames.into_iter().take(last + 1).skip(first).collect();
     let thin: Vec<usize> = (0..frames.len()).filter(|&k| frames[k].samples < FEW).collect();
     if let (Some(a), Some(b)) = (thin.first(), thin.last()) {
-        warnings.push(format!(
-            "{} フレーム（{a}〜{b} フレーム目のあたり）は、背景のわかる録画が {FEW} 本に届きませんでした。そのフレームのロゴは当てになりません",
-            thin.len()
-        ));
+        let at = if a == b { format!("{a} フレーム目") } else { format!("{a}〜{b} フレーム目のあたりの {} フレーム", thin.len()) };
+        warnings.push(format!("{at}は、使えた録画が {FEW} 本に届かず、ロゴの形が当てになりません。録画を増やすと良くなります"));
     }
     // 6. How long the still logo stays, and how it fades: per recording and
     // frame, the depth at which removing it leaves its edges flattest. A
@@ -1234,11 +1237,11 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
         })?;
         let hold = fit_fade(&depths, rest - a0);
         if hold.is_none() {
-            warnings.push("止まったロゴが消えるところまで録画に入っていないので、end と fadeout は測れませんでした".into());
+            warnings.push("録画がロゴの消える前で終わっているので、end と fadeout を測れませんでした。ロゴが画面から消えるまでを切り出すと測れます".into());
         }
         hold
     } else {
-        warnings.push("止まったロゴが当てにならないので、end と fadeout は測っていません".into());
+        warnings.push("動きが止まったあとのロゴが当てにならないので、end と fadeout は測っていません".into());
         None
     };
     let starts = off.iter().map(|o| o + a0).collect();
