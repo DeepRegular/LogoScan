@@ -129,6 +129,36 @@ pub fn grab_rgb(path: &Path, info: &VideoInfo, at: f64) -> io::Result<Vec<u8>> {
     Ok(v)
 }
 
+/// Frame `n` (counted from `start`, or from the beginning) as packed RGB,
+/// for display: picked by number, as the moving-logo analysis counts them.
+pub fn grab_rgb_frame(path: &Path, info: &VideoInfo, start: Option<f64>, n: u64) -> io::Result<Vec<u8>> {
+    let matrix = if is_hd(info) { "bt709" } else { "bt601" };
+    let mut cmd = tool("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    if let Some(s) = start {
+        cmd.args(seek_args(s));
+    }
+    cmd.arg("-i").arg(path);
+    if let Some(s) = start {
+        cmd.args(["-ss", &format!("{:.3}", s.clamp(0.0, PRE_ROLL))]);
+    }
+    let vf = format!("select='eq(n\\,{n})',scale=in_color_matrix={matrix}:in_range=tv:out_range=pc:flags=bilinear,format=rgb24");
+    let out = cmd
+        .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", &vf, "-fps_mode", "passthrough", "-frames:v", "1"])
+        .args(["-f", "rawvideo", "pipe:1"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| io::Error::other(format!("cannot run ffmpeg: {e}")))?;
+    let want = (info.width * info.height * 3) as usize;
+    if out.stdout.len() < want {
+        return Err(io::Error::other(format!("no frame {n}")));
+    }
+    let mut v = out.stdout;
+    v.truncate(want);
+    Ok(v)
+}
+
 /// One frame of the rectangle, planar Y/Cb/Cr in PIXEL_YC units.
 pub struct Frame {
     pub y: Vec<i16>,

@@ -113,7 +113,7 @@ fn grab_key_luma(path: &Path, w: usize, h: usize, at: f64) -> Option<Vec<u8>> {
     (out.stdout.len() >= w * h).then(|| out.stdout[..w * h].to_vec())
 }
 
-fn edges(luma: &[u8], w: usize, h: usize, count: &mut [u16]) {
+pub(crate) fn edges(luma: &[u8], w: usize, h: usize, count: &mut [u16]) {
     let p = |x: usize, y: usize| luma[y * w + x] as i32;
     for y in 1..h - 1 {
         for x in 1..w - 1 {
@@ -234,7 +234,7 @@ pub fn grow(r: Rect, margin: u32, width: u32, height: u32) -> Rect {
     Rect { x, y, w: x1 - x, h: y1 - y }
 }
 
-fn dilate(mask: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
+pub(crate) fn dilate(mask: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
     // Separable square dilation with running counts.
     let mut tmp = vec![false; w * h];
     for y in 0..h {

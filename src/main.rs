@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+use lgdscan::anim::{self, AnimJob, Stage};
 use lgdscan::detect::{self, DetectOptions};
 use lgdscan::job::{self, Job};
 use lgdscan::scan::Background;
@@ -32,6 +33,23 @@ usage:
       --passes N             least-squares passes, outliers dropped after
                              the first (default 3; 1 = plain least squares)
       --threads N            (default: all cores)
+  lgdscan anim INPUT... --rect X,Y,W,H [options]
+                             a logo that moves in (an animation played the same
+                             way each time): one .lgd entry per frame, named
+                             0, 1, 2...; needs several recordings that each
+                             contain the animation and the still logo after it
+      -o, --output FILE      file to write (default: anim.ldp)
+      --still FILE           also write the logo the animation settles into
+                             (a sample script for delogomod is written beside
+                             the output, with .avs)
+      --start SEC / --end SEC  range to read, per input
+      --search N             largest shift between recordings, in frames
+                             (default 90)
+      --threads N            (default: all cores)
+  lgdscan avs LOGO.ldp|LOGO.lgd [--end N --fadeout N] [-o FILE.avs]
+                             a sample AviSynth script for the logo file:
+                             delogomod's EraseLogomod for an .ldp, delogo's
+                             EraseLOGO for an .lgd (default: beside it, .avs)
   lgdscan detect INPUT [--samples N] [--share S] [--margin M] [--start SEC] [--end SEC]
                              find logo positions; prints --rect candidates
       --samples N            keyframes spread over the input (default 120)
@@ -50,6 +68,8 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("scan") => cmd_scan(&args[1..]),
         Some("detect") => cmd_detect(&args[1..]),
+        Some("anim") => cmd_anim(&args[1..]),
+        Some("avs") => cmd_avs(&args[1..]),
         Some("info") if args.len() == 2 => cmd_info(Path::new(&args[1])),
         Some("compare") if args.len() == 3 => cmd_compare(Path::new(&args[1]), Path::new(&args[2])),
         Some("render") if args.len() == 3 => cmd_render(Path::new(&args[1]), Path::new(&args[2])),
@@ -87,11 +107,7 @@ fn cmd_scan(args: &[String]) -> Res {
     while let Some(a) = it.next() {
         let mut val = || it.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
-            "--rect" => {
-                let v: Vec<u32> = val()?.split(',').map(|s| s.trim().parse()).collect::<Result<_, _>>()?;
-                let [x, y, w, h] = v[..] else { return Err("--rect takes X,Y,W,H".into()) };
-                rect = Some(Rect { x, y, w, h });
-            }
+            "--rect" => rect = Some(parse_rect(val()?)?),
             "-o" | "--output" => output = Some(PathBuf::from(val()?)),
             "-n" | "--name" => name = Some(val()?.clone()),
             "--start" => start = Some(val()?.parse::<f64>()?),
@@ -174,6 +190,138 @@ fn cmd_scan(args: &[String]) -> Res {
     f.flush()?;
     eprintln!("wrote {}", output.display());
     Ok(())
+}
+
+fn cmd_anim(args: &[String]) -> Res {
+    let mut inputs = Vec::new();
+    let mut rect = None;
+    let mut output = PathBuf::from("anim.ldp");
+    let mut still: Option<PathBuf> = None;
+    let (mut start, mut end) = (None, None);
+    let mut search = 90usize;
+    let mut threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().ok_or_else(|| format!("{a} needs a value"));
+        match a.as_str() {
+            "--rect" => rect = Some(parse_rect(val()?)?),
+            "-o" | "--output" => output = PathBuf::from(val()?),
+            "--still" => still = Some(PathBuf::from(val()?)),
+            "--start" => start = Some(val()?.parse::<f64>()?),
+            "--end" => end = Some(val()?.parse::<f64>()?),
+            "--search" => search = val()?.parse()?,
+            "--threads" => threads = val()?.parse::<usize>()?.max(1),
+            s if s.starts_with('-') => return Err(format!("unknown option {s}").into()),
+            s => inputs.push(PathBuf::from(s)),
+        }
+    }
+    let rect = rect.ok_or("--rect is required (the area the whole animation plays in)")?;
+    let mut job = AnimJob::new(inputs.clone(), rect);
+    job.start = start;
+    job.end = end;
+    job.search = search;
+    job.threads = threads;
+    let t0 = Instant::now();
+    let out = anim::run(
+        &job,
+        &|p| {
+            let what = match p.stage {
+                Stage::Align => "aligning".to_string(),
+                Stage::Locate => "finding the still logo".to_string(),
+                Stage::Still => "fitting the still logo".to_string(),
+                Stage::Coarse => "fitting, coarse".to_string(),
+                Stage::Fine(n) => format!("fitting, pass {n}/4"),
+                Stage::Fade => "measuring the fade".to_string(),
+            };
+            eprint!("\r  {what}: {}/{}          ", p.done, p.total);
+        },
+        &AtomicBool::new(false),
+    )?;
+    eprintln!();
+    for (input, s) in inputs.iter().zip(&out.starts) {
+        eprintln!("  starts at frame {s:5}  {}", input.display());
+    }
+    let n = out.frames.len();
+    let least = out.frames.iter().map(|f| f.samples).min().unwrap_or(0);
+    eprintln!("{n} frames in {:.1}s; every frame fitted on {least} or more recordings", t0.elapsed().as_secs_f64());
+    for w in &out.warnings {
+        eprintln!("warning: {w}");
+    }
+    if let Some(h) = out.hold {
+        eprintln!("the still logo stays until frame {} of the animation, fading over the last {}", h.end, h.fadeout);
+    }
+    let logos: Vec<lgd::Logo> = out
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(k, f)| lgd::Logo {
+            name: k.to_string().into_bytes(),
+            x: f.rect.x as i16,
+            y: f.rect.y as i16,
+            w: f.rect.w as i16,
+            h: f.rect.h as i16,
+            pixels: f.pixels.clone(),
+            ..Default::default()
+        })
+        .collect();
+    let mut f = BufWriter::new(File::create(&output)?);
+    lgd::write(&mut f, &logos)?;
+    f.flush()?;
+    eprintln!("wrote {}", output.display());
+    let sample = lgdscan::avs::path_for(&output);
+    let ldp_name = output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    lgdscan::avs::write(&sample, &lgdscan::avs::moving(&ldp_name, logos.len(), out.hold))?;
+    eprintln!("wrote {} (a sample script for delogomod)", sample.display());
+    if let Some(path) = still {
+        let mut logo = out.still.clone();
+        logo.name = lgd::encode_name(&path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
+        let mut f = BufWriter::new(File::create(&path)?);
+        lgd::write(&mut f, &[logo])?;
+        f.flush()?;
+        eprintln!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+fn cmd_avs(args: &[String]) -> Res {
+    let mut logo: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let (mut end, mut fade) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().ok_or_else(|| format!("{a} needs a value"));
+        match a.as_str() {
+            "--end" => end = Some(val()?.parse::<i64>()?),
+            "--fadeout" => fade = Some(val()?.parse::<i64>()?),
+            "-o" | "--output" => output = Some(PathBuf::from(val()?)),
+            s if s.starts_with('-') => return Err(format!("unknown option {s}").into()),
+            s => logo = Some(PathBuf::from(s)),
+        }
+    }
+    let logo = logo.ok_or("no logo file")?;
+    let logos = load(&logo)?;
+    let name = logo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let moving = logo.extension().is_some_and(|e| e.eq_ignore_ascii_case("ldp")) || logos.len() > 1;
+    let text = if moving {
+        let hold = match (end, fade) {
+            (Some(end), Some(fadeout)) => Some(anim::Hold { end, fadeout }),
+            (None, None) => None,
+            _ => return Err("give --end and --fadeout together".into()),
+        };
+        lgdscan::avs::moving(&name, logos.len(), hold)
+    } else {
+        lgdscan::avs::still(&name)
+    };
+    let output = output.unwrap_or_else(|| lgdscan::avs::path_for(&logo));
+    lgdscan::avs::write(&output, &text)?;
+    eprintln!("wrote {}", output.display());
+    Ok(())
+}
+
+fn parse_rect(v: &str) -> Result<Rect, Box<dyn std::error::Error>> {
+    let v: Vec<u32> = v.split(',').map(|s| s.trim().parse()).collect::<Result<_, _>>()?;
+    let [x, y, w, h] = v[..] else { return Err("--rect takes X,Y,W,H".into()) };
+    Ok(Rect { x, y, w, h })
 }
 
 fn cmd_detect(args: &[String]) -> Res {

@@ -1,3 +1,5 @@
+pub mod anim;
+pub mod avs;
 pub mod detect;
 pub mod erase;
 pub mod job;

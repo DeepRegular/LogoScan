@@ -76,6 +76,11 @@ const CP932_LOOKALIKES: &[(char, char)] = &[
     ('\u{00A6}', '\u{FFE4}'), // ¦ -> ￤
 ];
 
+/// The CP932 character that looks like `c`, or `c` itself.
+pub fn cp932_lookalike(c: char) -> char {
+    CP932_LOOKALIKES.iter().find(|(from, _)| *from == c).map_or(c, |(_, to)| *to)
+}
+
 /// Encodes a logo name in CP932, the code page AviUtl reads it in.
 /// Fails with the characters CP932 cannot hold.
 pub fn encode_name(name: &str) -> Result<Vec<u8>, String> {
@@ -83,7 +88,7 @@ pub fn encode_name(name: &str) -> Result<Vec<u8>, String> {
     let mut bad = String::new();
     let mut buf = [0u8; 4];
     for c in name.chars() {
-        let c = CP932_LOOKALIKES.iter().find(|(from, _)| *from == c).map_or(c, |(_, to)| *to);
+        let c = cp932_lookalike(c);
         let (bytes, _, unmappable) = encoding_rs::SHIFT_JIS.encode(c.encode_utf8(&mut buf));
         if unmappable {
             if !bad.contains(c) {

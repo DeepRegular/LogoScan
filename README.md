@@ -55,6 +55,12 @@ Recordings can also be dropped on the window (hold Shift to add to the inputs in
    switches to the logo removed. Move the slider to see how it holds up on other scenes.
 4. Name the logo and **Save**.
 
+For a moving logo, switch *Analyse* to **Moving logo** (see "A logo that moves" below). Open many recordings
+(*Add…*, or drop with Shift held), box the area the animation passes through and press **Analyse**. The result
+has a slider through the frames of the animation; pick a recording from the list of start frames to see that
+frame of it with the logo removed. **Save (.ldp)…** writes all the frames, **Save the still logo (.lgd)…** the
+logo it settles into. Opening an .ldp shows its frames.
+
 ## The command
 
 ```
@@ -110,6 +116,69 @@ Three things differ from logoscan:
   take the mean of their neighbours; vertically, interlaced 4:2:0 is interpolated within each field at
   MPEG-2 positions. Without this, the chroma opacity does not match AviUtl's.
 
+## A logo that moves
+
+Some channels bring their logo in with an animation at the start of a programme and then leave it standing.
+The animation plays the same way every time, so one logo per frame of it removes it.
+
+```
+lgdscan anim rec1.ts rec2.ts rec3.ts … --rect 0,0,704,320 -o anim.ldp --still settled.lgd
+```
+
+Give it many recordings that each show the animation and the still logo after it; the first ten seconds or so
+of each programme are enough. Three will do in principle, but bring a few dozen: with a dozen or so the still logo cannot be fitted and
+the last frames fall apart (a warning says so).
+
+- `--rect` is the area the whole animation plays in. Memory grows with it: 704×320 over 72 recordings takes
+  about 1.3 GB and three minutes or so.
+- The file is written in the .lgd format with one logo per frame, named `0`, `1`, `2`… in order. Each frame's
+  box is cut down to its own logo. The last one is the first frame on which the logo stands still.
+- `--still` also writes that still logo to a .lgd of its own.
+- The animation need not start at the same point in every recording: shifts of up to `--search` frames
+  (90) are found, and the frame each recording starts on is printed.
+- The same inputs give the same file, byte for byte.
+- Opacity stops at 999: delogo turns the picture inside out on a pixel over 1000.
+
+The .ldp is ready for delogomod in AviSynth. `EraseLogomod` applies the logos in the file one per frame, top
+to bottom, and keeps applying the last once they run out; as with the other .ldp, what follows once the logo
+stands still is left to `end` and `fadeout`. `start` is the start frame lgdscan prints for that recording, and
+`end` and `fadeout` are measured from the recordings, printed, and made the defaults of the sample script
+(below):
+
+```
+EraseLogomod(logofile="anim.ldp", start=3, end=3+232, fadeout=22)
+```
+
+For every frame after the logo settles, the depth at which removing the still logo leaves its edges flattest
+is found; delogomod's fade (a straight ramp down over the last `fadeout` frames before `end`) is fitted to the
+middle value over all recordings. On the 72 recordings here the depth stays at 0.99 up to frame 209 and falls to
+nothing at 234. The example that comes with delogomod (`end=start+218, fadeout=28`) would start fading these
+while the logo is still at full strength. Recordings that stop before the logo is gone give no `end` and
+`fadeout` (a warning says so). lgdscan counts frames from the first one it decodes; depending on how AviSynth opens the
+file, the count may start a frame or two apart, so check the result.
+
+### Sample scripts
+
+Each logo file gets a sample of how to use it, an .avs of the same name (CP932, CRLF line ends). `lgdscan anim`
+always writes one beside the .ldp; the window writes one on saving while *also write a sample .avs* is ticked;
+`lgdscan avs logo.ldp --end 232 --fadeout 22` or `lgdscan avs logo.lgd` writes one afterwards.
+
+For an .ldp it is a function around delogomod's `EraseLogomod`, the measured `end` and `fadeout` as defaults:
+
+```
+function EraseMovingLogo(clip c, int "start", int "length", int "fadeout")
+{
+  start = default(start, 0)
+  length = default(length, 232)
+  fadeout = default(fadeout, 22)
+  return c.EraseLogomod(logofile="anim.ldp", start=start, end=start+length, fadeout=fadeout)
+}
+#EraseMovingLogo(16)
+```
+
+For an .lgd it is one around delogo's `EraseLOGO` (`EraseStillLogo(start, end, fadein, fadeout)`, no `end` meaning
+to the last frame). Opening the recording and `LoadPlugin` are left to your own script.
+
 ## Finding the logo
 
 The pictures change; the logo does not. Keyframes are sampled across the recording and, for every pixel,
@@ -143,7 +212,7 @@ Two logos made from different episodes of the same programme differ by about as 
 ## Not yet
 
 - Fade in / fade out and the other fields (fi/fo/st/ed) are left at 0.
-- One logo per file.
+- `scan` writes one logo per file.
 
 ## Building
 

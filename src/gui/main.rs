@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use eframe::egui::{self, Color32, CursorIcon, Key, PointerButton, Pos2, Sense, Stroke, TextureHandle, TextureOptions, Vec2};
+use lgdscan::anim::{self, AnimJob, AnimOutcome, Stage};
 use lgdscan::detect::{self, Candidate, DetectOptions, Detection};
 use lgdscan::erase;
 use lgdscan::job::{self, Job, Outcome};
@@ -99,8 +100,37 @@ impl<T: Send + 'static> Task<T> {
 
 struct Grabbed {
     time: f64,
+    /// For a moving logo: the input and frame shown.
+    frame: Option<(usize, u64)>,
     rgb: Vec<u8>,
     erased: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Still,
+    Moving,
+}
+
+/// A moving logo: one logo per frame of the animation.
+struct Anim {
+    logos: Vec<Logo>,
+    /// The logo the animation settles into, when it was analysed here.
+    still: Option<Logo>,
+    /// Per input: where the animation starts, in frames from `start`.
+    starts: Vec<(PathBuf, i64)>,
+    /// What the frames were counted from (the range, when one was set).
+    start: Option<f64>,
+    /// Recordings each frame was fitted on.
+    samples: Vec<usize>,
+    /// delogomod's end and fadeout, when measured.
+    hold: Option<anim::Hold>,
+    /// The frame and input looked at.
+    k: usize,
+    input: usize,
+    tex: Option<(usize, TextureHandle)>,
+    /// What ffprobe said about the inputs looked at.
+    infos: std::collections::HashMap<usize, VideoInfo>,
 }
 
 #[derive(Clone, Copy)]
@@ -174,6 +204,16 @@ struct App {
     outcome: Option<Outcome>,
     show_erased: bool,
     name: String,
+
+    mode: Mode,
+    search: usize,
+    anim_task: Option<Task<AnimOutcome>>,
+    anim: Option<Anim>,
+    /// Showing a frame of the animation rather than the time on the slider.
+    anim_preview: bool,
+    /// Write a sample AviSynth script beside each logo file saved.
+    write_sample: bool,
+    shown_frame: Option<(usize, u64)>,
 }
 
 impl Default for App {
@@ -214,6 +254,13 @@ impl Default for App {
             outcome: None,
             show_erased: false,
             name: String::new(),
+            mode: Mode::Still,
+            search: 90,
+            anim_task: None,
+            anim: None,
+            anim_preview: false,
+            write_sample: true,
+            shown_frame: None,
         }
     }
 }
@@ -236,7 +283,7 @@ fn same_rect(a: Rect, b: Rect) -> bool {
 
 impl App {
     fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lgd")) {
+        if is_logo_file(&path) {
             self.load_lgd(ctx, &path);
             return;
         }
@@ -283,6 +330,13 @@ impl App {
     fn load_lgd(&mut self, ctx: &egui::Context, path: &Path) {
         let r = File::open(path).and_then(|f| lgd::read(BufReader::new(f)));
         match r {
+            Ok(logos) if logos.len() > 1 => {
+                self.status = format!("{} を読みました（動くロゴ、{} フレーム）", path.display(), logos.len());
+                self.mode = Mode::Moving;
+                let samples = vec![0; logos.len()];
+                self.anim = Some(Anim { logos, still: None, starts: Vec::new(), start: None, samples, hold: None, k: 0, input: 0, tex: None, infos: Default::default() });
+                self.anim_preview = false;
+            }
             Ok(logos) if !logos.is_empty() => {
                 let l = logos.into_iter().next().unwrap();
                 self.rect = Rect { x: l.x.max(0) as u32, y: l.y.max(0) as u32, w: l.w as u32, h: l.h as u32 };
@@ -321,22 +375,41 @@ impl App {
             self.grab_again = true;
             return;
         }
+        if self.anim_preview {
+            let info = self.preview_info();
+            if let (Some(a), Some(info)) = (&self.anim, info) {
+                if let Some((path, s)) = a.starts.get(a.input) {
+                    let (path, k, input, start) = (path.clone(), a.k, a.input, a.start);
+                    let n = (s + k as i64).max(0) as u64;
+                    let logo = if self.show_erased { a.logos.get(k).cloned() } else { None };
+                    let at = self.time;
+                    self.grab = Some(Task::spawn(ctx, move |_, _| {
+                        let rgb = source::grab_rgb_frame(&path, &info, start, n).map_err(|e| e.to_string())?;
+                        let erased = logo.and_then(|l| erased_frame(&path, &info, &l, start, n, &rgb).ok());
+                        Ok(Grabbed { time: at, frame: Some((input, n)), rgb, erased })
+                    }));
+                    return;
+                }
+            }
+        }
         let (Some(path), Some(info)) = (self.inputs.first().cloned(), self.info.clone()) else { return };
         let at = self.time;
         let logo = if self.show_erased { self.logo.clone() } else { None };
         self.grab = Some(Task::spawn(ctx, move |_, _| {
             let rgb = source::grab_rgb(&path, &info, at).map_err(|e| e.to_string())?;
             let erased = logo.and_then(|l| erased_picture(&path, &info, &l, at, &rgb).ok());
-            Ok(Grabbed { time: at, rgb, erased })
+            Ok(Grabbed { time: at, frame: None, rgb, erased })
         }));
     }
 
     fn poll_tasks(&mut self, ctx: &egui::Context) {
+        self.poll_anim(ctx);
         if let Some(r) = self.grab.as_ref().and_then(|t| t.poll()) {
             self.grab = None;
             match r {
                 Ok(g) => {
                     self.shown_time = Some(g.time);
+                    self.shown_frame = g.frame;
                     self.frame_rgb = Some(g.rgb);
                     self.erased_rgb = g.erased;
                     self.frame_tex = None;
@@ -375,6 +448,260 @@ impl App {
                 Err(e) => self.status = e,
             }
         }
+    }
+
+    fn poll_anim(&mut self, ctx: &egui::Context) {
+        let Some(r) = self.anim_task.as_ref().and_then(|t| t.poll()) else { return };
+        self.anim_task = None;
+        match r {
+            Ok(o) => {
+                let logos: Vec<Logo> = o
+                    .frames
+                    .iter()
+                    .enumerate()
+                    .map(|(k, f)| Logo {
+                        name: k.to_string().into_bytes(),
+                        x: f.rect.x as i16,
+                        y: f.rect.y as i16,
+                        w: f.rect.w as i16,
+                        h: f.rect.h as i16,
+                        pixels: f.pixels.clone(),
+                        ..Default::default()
+                    })
+                    .collect();
+                let least = o.frames.iter().map(|f| f.samples).min().unwrap_or(0);
+                self.status = format!("解析が終わりました（{} フレーム、どのフレームも {least} 本以上の録画から）", logos.len());
+                for w in &o.warnings {
+                    self.status = format!("{}。{w}", self.status);
+                }
+                let starts = self.inputs.iter().cloned().zip(o.starts.iter().copied()).collect();
+                let start = if self.range_on { Some(self.range.0) } else { None };
+                self.anim = Some(Anim {
+                    samples: o.frames.iter().map(|f| f.samples).collect(),
+                    hold: o.hold,
+                    logos,
+                    still: Some(o.still),
+                    starts,
+                    start,
+                    k: 0,
+                    input: 0,
+                    tex: None,
+                    infos: Default::default(),
+                });
+                self.show_erased = true;
+                self.show_presence = false;
+                self.anim_preview = true;
+                self.erased_rgb = None;
+                self.frame_tex = None;
+                self.request_frame(ctx);
+            }
+            Err(e) => self.status = e,
+        }
+    }
+
+    fn start_anim(&mut self, ctx: &egui::Context) {
+        if self.inputs.len() < 3 {
+            self.status = "動くロゴには、アニメーションの映っている録画が 3 本以上要ります（「追加…」で足してください）".into();
+            return;
+        }
+        let mut job = AnimJob::new(self.inputs.clone(), self.rect);
+        if self.range_on {
+            job.start = Some(self.range.0);
+            job.end = Some(self.range.1);
+        }
+        job.scan = self.scan;
+        job.search = self.search;
+        self.anim_task = Some(Task::spawn(ctx, move |cancel, report| {
+            anim::run(
+                &job,
+                &|p| {
+                    let (i, what) = match p.stage {
+                        Stage::Align => (0, "録画どうしの位置を合わせています".to_string()),
+                        Stage::Locate => (1, "止まったロゴを探しています".to_string()),
+                        Stage::Still => (2, "止まったロゴを当てはめています".to_string()),
+                        Stage::Coarse => (3, "粗く当てはめています".to_string()),
+                        Stage::Fine(n) => (3 + n as usize, format!("当てはめています（{n}/4）")),
+                        Stage::Fade => (8, "止まったロゴの消え方を測っています".to_string()),
+                    };
+                    let f = (i as f64 + p.done as f64 / p.total.max(1) as f64) / 9.0;
+                    report(f as f32, format!("{what}  {}/{} 本", p.done, p.total));
+                },
+                cancel,
+            )
+        }));
+    }
+
+    fn save_ldp(&mut self) {
+        let Some(a) = &self.anim else { return };
+        let default = if self.name.is_empty() { "logo.ldp".to_string() } else { format!("{}.ldp", self.name) };
+        let Some(path) = rfd::FileDialog::new().add_filter("動くロゴ", &["ldp"]).set_file_name(&default).save_file() else { return };
+        let r = File::create(&path).and_then(|f| {
+            let mut w = BufWriter::new(f);
+            lgd::write(&mut w, &a.logos)?;
+            w.flush()
+        });
+        self.status = match r {
+            Ok(()) => {
+                let mut msg = format!("{} に保存しました（{} フレーム）", path.display(), a.logos.len());
+                if self.write_sample {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let sample = lgdscan::avs::path_for(&path);
+                    msg = match lgdscan::avs::write(&sample, &lgdscan::avs::moving(&name, a.logos.len(), a.hold)) {
+                        Ok(()) => format!("{msg}。サンプルを {} に書きました", sample.display()),
+                        Err(e) => format!("{msg}。サンプルは書けません: {e}"),
+                    };
+                }
+                msg
+            }
+            Err(e) => format!("保存できません: {e}"),
+        };
+    }
+
+    /// The message for a saved .lgd, after writing its sample script.
+    fn saved_lgd(&self, path: &Path) -> String {
+        let msg = format!("{} に保存しました", path.display());
+        if !self.write_sample {
+            return msg;
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let sample = lgdscan::avs::path_for(path);
+        match lgdscan::avs::write(&sample, &lgdscan::avs::still(&name)) {
+            Ok(()) => format!("{msg}。サンプルを {} に書きました", sample.display()),
+            Err(e) => format!("{msg}。サンプルは書けません: {e}"),
+        }
+    }
+
+    fn save_still(&mut self) {
+        let Some(still) = self.anim.as_ref().and_then(|a| a.still.clone()) else { return };
+        let default = if self.name.is_empty() { "still.lgd".to_string() } else { format!("{}.lgd", self.name) };
+        let Some(path) = rfd::FileDialog::new().add_filter("ロゴデータ", &["lgd"]).set_file_name(&default).save_file() else { return };
+        let name = if self.name.is_empty() {
+            path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+        } else {
+            self.name.clone()
+        };
+        let mut logo = still;
+        logo.name = match lgd::encode_name(&name) {
+            Ok(b) => lgd::stored_name(&b).to_vec(),
+            Err(bad) => {
+                self.status = format!("ロゴ名に CP932 で書けない文字があります: {bad}");
+                return;
+            }
+        };
+        let r = File::create(&path).and_then(|f| {
+            let mut w = BufWriter::new(f);
+            lgd::write(&mut w, &[logo])?;
+            w.flush()
+        });
+        self.status = match r {
+            Ok(()) => self.saved_lgd(&path),
+            Err(e) => format!("保存できません: {e}"),
+        };
+    }
+
+    /// The result of a moving-logo analysis: the frames, where each
+    /// recording starts, and saving.
+    fn anim_result(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let Some(a) = &mut self.anim else {
+            ui.label(egui::RichText::new("まだありません").weak());
+            return;
+        };
+        let n = a.logos.len();
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            if ui.small_button("◀").clicked() && a.k > 0 {
+                a.k -= 1;
+                changed = true;
+            }
+            if ui.small_button("▶").clicked() && a.k + 1 < n {
+                a.k += 1;
+                changed = true;
+            }
+            changed |= ui.add(egui::Slider::new(&mut a.k, 0..=n.saturating_sub(1)).text(format!("/ {} フレーム", n))).changed();
+        });
+        let k = a.k.min(n.saturating_sub(1));
+        let logo = &a.logos[k];
+        if a.tex.as_ref().is_none_or(|(t, _)| *t != k) {
+            let max = logo.pixels.iter().map(|p| p.dp_y).max().unwrap_or(1).max(1) as f32;
+            let rgb: Vec<u8> = logo
+                .pixels
+                .iter()
+                .flat_map(|p| {
+                    let v = (p.dp_y.max(0) as f32 / max * 255.0) as u8;
+                    [v, v, v]
+                })
+                .collect();
+            let img = egui::ColorImage::from_rgb([logo.w as usize, logo.h as usize], &rgb);
+            a.tex = Some((k, ctx.load_texture("anim", img, TextureOptions::NEAREST)));
+        }
+        if let Some((_, tex)) = &a.tex {
+            let scale = (ui.available_width() / logo.w as f32).min(140.0 / logo.h as f32).min(2.0);
+            ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::new(logo.w as f32 * scale, logo.h as f32 * scale)));
+        }
+        let lr = Rect { x: logo.x as u32, y: logo.y as u32, w: logo.w as u32, h: logo.h as u32 };
+        let peak = logo.pixels.iter().map(|p| p.dp_y).max().unwrap_or(0);
+        let used = a.samples.get(k).copied().unwrap_or(0);
+        ui.label(if used > 0 {
+            format!("{}   不透明度の最大 {peak} / 1000   録画 {used} 本から", rect_text(lr))
+        } else {
+            format!("{}   不透明度の最大 {peak} / 1000", rect_text(lr))
+        });
+        if !a.starts.is_empty() {
+            ui.add_space(4.0);
+            ui.label("録画ごとの開始フレーム（選ぶとその録画で見られます）");
+            egui::ScrollArea::vertical().id_salt("starts").max_height(140.0).show(ui, |ui| {
+                for (i, (p, st)) in a.starts.iter().enumerate() {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if ui.selectable_label(i == a.input, format!("{st:6}  {name}")).clicked() {
+                        a.input = i;
+                        changed = true;
+                    }
+                }
+            });
+            let (p, st) = &a.starts[a.input.min(a.starts.len() - 1)];
+            let file = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let call = format!("EraseMovingLogo({st})");
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&call).monospace().small());
+                if ui.small_button("コピー").on_hover_text(format!("{file} での呼び方（サンプルの .avs の関数）")).clicked() {
+                    ctx.copy_text(call.clone());
+                }
+            });
+            if !self.anim_preview && ui.button("この録画のこのフレームを表示").clicked() {
+                changed = true;
+            }
+        }
+        if changed {
+            self.anim_preview = !a.starts.is_empty();
+            self.erased_rgb = None;
+            self.frame_tex = None;
+            if self.anim_preview {
+                self.request_frame(&ctx);
+            }
+        }
+        if ui.checkbox(&mut self.show_erased, "ロゴを消して表示").changed() {
+            self.erased_rgb = None;
+            self.frame_tex = None;
+            if self.show_erased {
+                self.request_frame(&ctx);
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("ファイル名");
+            ui.text_edit_singleline(&mut self.name);
+        });
+        ui.horizontal(|ui| {
+            if ui.button("保存（.ldp）…").on_hover_text("delogomod の EraseLogomod が上から 1 フレームずつ使う形で書きます").clicked() {
+                self.save_ldp();
+            }
+            let has_still = self.anim.as_ref().is_some_and(|a| a.still.is_some());
+            if ui.add_enabled(has_still, egui::Button::new("止まったロゴを保存（.lgd）…")).clicked() {
+                self.save_still();
+            }
+        });
+        ui.checkbox(&mut self.write_sample, "サンプルの .avs も書く")
+            .on_hover_text("delogomod での使い方を、.ldp と同じ名前の .avs に書きます（end と fadeout は測れたときはその値）");
     }
 
     fn refresh_candidates(&mut self, pick_first: bool) {
@@ -461,7 +788,7 @@ impl App {
             w.flush()
         });
         self.status = match r {
-            Ok(()) => format!("{} に保存しました", path.display()),
+            Ok(()) => self.saved_lgd(&path),
             Err(e) => format!("保存できません: {e}"),
         };
     }
@@ -491,22 +818,29 @@ impl App {
                         }
                     }
                 }
-                if ui.button(".lgd を開く…").clicked() {
-                    if let Some(f) = rfd::FileDialog::new().add_filter("ロゴデータ", &["lgd"]).pick_file() {
+                if ui.button(".lgd / .ldp を開く…").clicked() {
+                    if let Some(f) = rfd::FileDialog::new().add_filter("ロゴデータ", &["lgd", "ldp"]).pick_file() {
                         self.load_lgd(&ctx, &f);
                     }
                 }
             });
             let mut remove = None;
-            for (i, p) in self.inputs.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    if i > 0 && ui.small_button("×").clicked() {
-                        remove = Some(i);
-                    }
-                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    ui.add(egui::Label::new(name).truncate()).on_hover_text(p.display().to_string());
-                });
+            if self.inputs.len() > 1 {
+                ui.label(egui::RichText::new(format!("{} 本", self.inputs.len())).small().weak());
             }
+            // Many recordings (a moving logo wants dozens) must not push
+            // everything else off the panel.
+            egui::ScrollArea::vertical().id_salt("inputs").max_height(150.0).show(ui, |ui| {
+                for (i, p) in self.inputs.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if i > 0 && ui.small_button("×").clicked() {
+                            remove = Some(i);
+                        }
+                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        ui.add(egui::Label::new(name).truncate()).on_hover_text(p.display().to_string());
+                    });
+                }
+            });
             if let Some(i) = remove {
                 self.inputs.remove(i);
             }
@@ -532,14 +866,14 @@ impl App {
             if self.rect.y + self.rect.h > mh {
                 self.rect.h = mh - self.rect.y;
             }
-            ui.label(
-                egui::RichText::new(
-                    "絵の上でドラッグして囲む・動かす・辺を伸ばす。矢印キーで 1 画素ずつ動かし、Shift+矢印で幅と高さを変えます。\
-                     外周の 1 画素を背景として読むので、ロゴにかからないよう少し余白をとってください。",
-                )
-                .small()
-                .weak(),
-            );
+            let hint = if self.mode == Mode::Still {
+                "絵の上でドラッグして囲む・動かす・辺を伸ばす。矢印キーで 1 画素ずつ動かし、Shift+矢印で幅と高さを変えます。\
+                 外周の 1 画素を背景として読むので、ロゴにかからないよう少し余白をとってください。"
+            } else {
+                "絵の上でドラッグして囲む・動かす・辺を伸ばす。矢印キーで 1 画素ずつ動かし、Shift+矢印で幅と高さを変えます。\
+                 動くロゴでは、アニメーションが通る範囲を全部囲んでください（広すぎると時間とメモリを使います）。"
+            };
+            ui.label(egui::RichText::new(hint).small().weak());
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -578,6 +912,21 @@ impl App {
 
             ui.separator();
             ui.heading("解析");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.mode, Mode::Still, "止まったロゴ");
+                ui.selectable_value(&mut self.mode, Mode::Moving, "動くロゴ")
+                    .on_hover_text("番組の頭でアニメーションしながら出てくるロゴ。1 フレームごとのロゴを .ldp に書きます");
+            });
+            if self.mode == Mode::Moving {
+                ui.label(
+                    egui::RichText::new(
+                        "アニメーションと、そのあと止まったロゴの両方が映っている録画を何本も入れてください（3 本以上、数十本あると安定します。\
+                         番組の頭を 10 秒ほど切り出したもので足ります）。枠はアニメーション全体が収まるように囲みます。",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
             ui.checkbox(&mut self.range_on, "範囲を指定");
             if self.range_on {
                 let dur = self.info.as_ref().map_or(0.0, |i| i.duration);
@@ -599,7 +948,17 @@ impl App {
                     std::mem::swap(&mut self.range.0, &mut self.range.1);
                 }
             }
-            egui::Grid::new("params").num_columns(2).show(ui, |ui| {
+            let still = self.mode == Mode::Still;
+            if !still {
+                egui::Grid::new("params").num_columns(2).show(ui, |ui| {
+                    ui.label("ずれの探索幅");
+                    ui.add(egui::DragValue::new(&mut self.search).range(5..=600).suffix(" フレーム"))
+                        .on_hover_text("録画どうしで、アニメーションの始まる位置がこれだけずれていても合わせます");
+                    ui.end_row();
+                });
+            }
+            if still {
+                egui::Grid::new("params2").num_columns(2).show(ui, |ui| {
                 ui.label("間引き");
                 ui.add(egui::DragValue::new(&mut self.step).range(1..=30).suffix(" フレームに 1 枚"));
                 ui.end_row();
@@ -618,6 +977,9 @@ impl App {
                     }
                 });
                 ui.end_row();
+            });
+            }
+            egui::Grid::new("params3").num_columns(2).show(ui, |ui| {
                 ui.label("色差の補間");
                 let label = |s: Scan| match s {
                     Scan::Auto => "自動",
@@ -632,7 +994,21 @@ impl App {
                 ui.end_row();
             });
             ui.add_space(4.0);
-            if let Some(t) = &self.scan_task {
+            if let Some(t) = &self.anim_task {
+                let (f, text) = t.progress();
+                ui.add(egui::ProgressBar::new(f).show_percentage());
+                ui.label(text);
+                if ui.button("中止").clicked() {
+                    t.cancel.store(true, Ordering::Relaxed);
+                }
+            } else if !still {
+                if ui
+                    .add_enabled(self.info.is_some() && self.scan_task.is_none(), egui::Button::new("解析開始").min_size(Vec2::new(120.0, 28.0)))
+                    .clicked()
+                {
+                    self.start_anim(&ctx);
+                }
+            } else if let Some(t) = &self.scan_task {
                 let (f, text) = t.progress();
                 ui.add(egui::ProgressBar::new(f).show_percentage());
                 ui.label(text);
@@ -640,7 +1016,7 @@ impl App {
                     t.cancel.store(true, Ordering::Relaxed);
                 }
             } else if ui
-                .add_enabled(self.info.is_some(), egui::Button::new("解析開始").min_size(Vec2::new(120.0, 28.0)))
+                .add_enabled(self.info.is_some() && self.anim_task.is_none(), egui::Button::new("解析開始").min_size(Vec2::new(120.0, 28.0)))
                 .clicked()
             {
                 self.start_scan(&ctx);
@@ -648,7 +1024,9 @@ impl App {
 
             ui.separator();
             ui.heading("結果");
-            if let (Some(logo), Some(tex)) = (&self.logo, &self.logo_tex) {
+            if !still {
+                self.anim_result(ui);
+            } else if let (Some(logo), Some(tex)) = (&self.logo, &self.logo_tex) {
                 // Two screen points per pixel at most, and no taller than 120.
                 let scale = (ui.available_width() / logo.w as f32).min(120.0 / logo.h as f32).min(2.0);
                 let (w, h) = (logo.w as f32 * scale, logo.h as f32 * scale);
@@ -685,13 +1063,37 @@ impl App {
                         ui.label(egui::RichText::new(format!("CP932 で {} / {} バイト", b.len(), lgd::NAME_MAX_V1)).small().weak());
                     }
                 }
-                if ui.button("保存…").clicked() {
-                    self.save_lgd();
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("保存…").clicked() {
+                        self.save_lgd();
+                    }
+                    ui.checkbox(&mut self.write_sample, "サンプルの .avs も書く")
+                        .on_hover_text("delogo での使い方を、.lgd と同じ名前の .avs に書きます");
+                });
             } else {
                 ui.label(egui::RichText::new("まだありません").weak());
             }
         });
+    }
+
+    /// The input the moving-logo preview shows, probed once.
+    fn preview_info(&mut self) -> Option<VideoInfo> {
+        let a = self.anim.as_mut()?;
+        let i = a.input;
+        if let Some(v) = a.infos.get(&i) {
+            return Some(v.clone());
+        }
+        let info = source::probe(&a.starts.get(i)?.0).ok()?;
+        a.infos.insert(i, info.clone());
+        Some(info)
+    }
+
+    fn leave_anim_preview(&mut self) {
+        if self.anim_preview {
+            self.anim_preview = false;
+            self.erased_rgb = None;
+            self.frame_tex = None;
+        }
     }
 
     fn bottom_panel(&mut self, ui: &mut egui::Ui) {
@@ -719,8 +1121,10 @@ impl App {
             let r = ui.add(egui::Slider::new(&mut self.time, 0.0..=dur).show_value(false));
             if let Some(d) = jump {
                 self.time = (self.time + d).clamp(0.0, dur);
+                self.leave_anim_preview();
                 self.request_frame(&ctx);
             } else if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                self.leave_anim_preview();
                 self.request_frame(&ctx);
             }
         });
@@ -733,7 +1137,8 @@ impl App {
         let resp = ui.allocate_rect(area, Sense::click_and_drag());
         let painter = ui.painter_at(area);
         painter.rect_filled(area, 0.0, Color32::from_gray(24));
-        let Some(info) = self.info.clone() else {
+        let preview_info = if self.anim_preview { self.preview_info() } else { None };
+        let Some(info) = preview_info.or_else(|| self.info.clone()) else {
             painter.text(
                 area.center(),
                 egui::Align2::CENTER_CENTER,
@@ -924,7 +1329,21 @@ impl App {
             painter.rect_filled(egui::Rect::from_center_size(c, Vec2::splat(6.0)), 0.0, yellow);
         }
         painter.text(sr.left_top() - Vec2::new(0.0, 3.0), egui::Align2::LEFT_BOTTOM, rect_text(self.rect), egui::FontId::proportional(13.0), yellow);
-        if let Some(t) = self.shown_time.filter(|t| (t - self.time).abs() > 1e-6) {
+        if self.anim_preview {
+            if let Some(a) = &self.anim {
+                let l = &a.logos[a.k.min(a.logos.len() - 1)];
+                let lr = self.view.rect_to_screen(area, Rect { x: l.x.max(0) as u32, y: l.y.max(0) as u32, w: l.w as u32, h: l.h as u32 });
+                painter.rect_stroke(lr, 0.0, Stroke::new(1.0, Color32::from_rgb(255, 120, 60)), egui::StrokeKind::Outside);
+                let text = match self.shown_frame {
+                    Some((i, n)) => {
+                        let name = a.starts.get(i).and_then(|(p, _)| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        format!("アニメーションの {} フレーム目（{name} の {n} フレーム目）", a.k)
+                    }
+                    None => "読み込んでいます…".into(),
+                };
+                painter.text(area.left_top() + Vec2::new(8.0, 8.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), Color32::from_rgb(255, 160, 100));
+            }
+        } else if let Some(t) = self.shown_time.filter(|t| (t - self.time).abs() > 1e-6) {
             painter.text(
                 area.left_top() + Vec2::new(8.0, 8.0),
                 egui::Align2::LEFT_TOP,
@@ -950,6 +1369,11 @@ fn erased_picture(path: &Path, info: &VideoInfo, logo: &Logo, at: f64, rgb: &[u8
         .next_frame()
         .map_err(|e| e.to_string())?
         .ok_or("フレームがありません")?;
+    Ok(apply_erase(info, logo, rect, frame, rgb))
+}
+
+/// `rgb` with `logo` removed from `frame`, which covers `rect`.
+fn apply_erase(info: &VideoInfo, logo: &Logo, rect: Rect, frame: source::Frame, rgb: &[u8]) -> Vec<u8> {
     let hd = source::is_hd(info);
     let before = erase::frame_to_rgb(&frame, hd);
     let mut frame = frame;
@@ -966,7 +1390,30 @@ fn erased_picture(path: &Path, info: &VideoInfo, logo: &Logo, at: f64, rgb: &[u8
             }
         }
     }
-    Ok(out)
+    out
+}
+
+/// Like [`erased_picture`], for frame `n` counted from `start`.
+fn erased_frame(path: &Path, info: &VideoInfo, logo: &Logo, start: Option<f64>, n: u64, rgb: &[u8]) -> Result<Vec<u8>, String> {
+    if logo.x < 0 || logo.y < 0 || logo.x as u32 + logo.w as u32 > info.width || logo.y as u32 + logo.h as u32 > info.height {
+        return Err("ロゴが絵の外にあります".into());
+    }
+    let rect = Rect { x: logo.x as u32, y: logo.y as u32, w: logo.w as u32, h: logo.h as u32 };
+    let opt = ReadOptions { start, duration: None, step: 1, threads: 2, scan: Scan::Auto };
+    let mut reader = Reader::open(path, info, rect, &opt).map_err(|e| e.to_string())?;
+    let mut frame = None;
+    for _ in 0..=n {
+        frame = reader.next_frame().map_err(|e| e.to_string())?;
+        if frame.is_none() {
+            break;
+        }
+    }
+    let frame = frame.ok_or("フレームがありません")?;
+    Ok(apply_erase(info, logo, rect, frame, rgb))
+}
+
+fn is_logo_file(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lgd") || e.eq_ignore_ascii_case("ldp"))
 }
 
 impl eframe::App for App {
@@ -976,7 +1423,7 @@ impl eframe::App for App {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         if !dropped.is_empty() {
             let (lgds, videos): (Vec<PathBuf>, Vec<PathBuf>) =
-                dropped.into_iter().partition(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lgd")));
+                dropped.into_iter().partition(|p| is_logo_file(p));
             if !videos.is_empty() {
                 // Shift while dropping adds to the inputs instead of replacing them.
                 if self.inputs.is_empty() || !ctx.input(|i| i.modifiers.shift) {
@@ -994,7 +1441,7 @@ impl eframe::App for App {
         egui::Panel::right("side").default_size(380.0).min_size(300.0).show(ui, |ui| self.side_panel(ui));
         egui::Panel::bottom("bottom").show(ui, |ui| self.bottom_panel(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| self.picture(ui));
-        if self.grab.is_some() || self.scan_task.is_some() || self.detect_task.is_some() {
+        if self.grab.is_some() || self.scan_task.is_some() || self.detect_task.is_some() || self.anim_task.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }

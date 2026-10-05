@@ -336,7 +336,7 @@ fn fit(xs: &[f64], ys: &[f64], passes: u32, keep: &mut Vec<bool>) -> Option<(f64
 
 /// logoscan's conversion: dp = (1-A)*1000, colour = B/(1-A); a pixel whose
 /// dp rounds to zero or whose colour overflows is stored as (0, 0).
-fn to_lgd(a: f64, b: f64) -> (i16, i16) {
+pub(crate) fn to_lgd(a: f64, b: f64) -> (i16, i16) {
     let alpha = 1.0 - a;
     if alpha == 0.0 {
         return (0, 0);
