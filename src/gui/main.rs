@@ -666,12 +666,12 @@ impl App {
                 Some(h) => format!("EraseLogomod(logofile=\"{ldp}\", start={st}, end={st}+{}, fadeout={})", h.end, h.fadeout),
                 None => format!("EraseLogomod(logofile=\"{ldp}\", start={st})"),
             };
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&call).monospace().small());
-                if ui.small_button("コピー").on_hover_text(format!("{file} での呼び方")).clicked() {
-                    ctx.copy_text(call.clone());
-                }
-            });
+            // Wrapped on its own line: at the normal size it is wider than
+            // the panel.
+            ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
+            if ui.button("コピー").on_hover_text(format!("{file} での呼び方")).clicked() {
+                ctx.copy_text(call.clone());
+            }
             if !self.anim_preview && ui.button("この録画のこのフレームを表示").clicked() {
                 changed = true;
             }
