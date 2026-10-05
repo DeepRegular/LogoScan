@@ -1,16 +1,16 @@
 //! One logo analysis from start to finish, shared by the CLI and the GUI.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::lgd::{self, LogoPixel};
 use crate::scan::{Background, Params, Scanner};
-use crate::source::{self, ReadOptions, Reader, Rect, Scan};
+use crate::source::{self, Input, ReadOptions, Reader, Rect, Scan};
 
 #[derive(Clone, Debug)]
 pub struct Job {
-    pub inputs: Vec<PathBuf>,
+    pub inputs: Vec<Input>,
     pub rect: Rect,
+    /// A range read from every input (within its own stretch, if it has one).
     pub start: Option<f64>,
     pub end: Option<f64>,
     pub step: u32,
@@ -24,7 +24,7 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn new(inputs: Vec<PathBuf>, rect: Rect) -> Job {
+    pub fn new(inputs: Vec<Input>, rect: Rect) -> Job {
         Job {
             inputs,
             rect,
@@ -101,19 +101,18 @@ pub fn run(job: &Job, progress: &mut dyn FnMut(&Progress), cancel: &AtomicBool) 
     let mut scanner = Scanner::new(r.w as usize, r.h as usize, params);
     let mut p = Progress { inputs: job.inputs.len(), ..Default::default() };
     for (k, input) in job.inputs.iter().enumerate() {
-        let info = source::probe(input).map_err(|e| e.to_string())?;
+        let Some((start, end)) = input.window(job.start, job.end) else { continue };
+        let path = &input.path;
+        let info = source::probe(path).map_err(|e| e.to_string())?;
         let opt = ReadOptions {
-            start: job.start,
-            duration: job.end.map(|e| e - job.start.unwrap_or(0.0)),
+            start,
+            duration: end.map(|e| e - start.unwrap_or(0.0)),
             step: job.step,
             threads: job.threads.min(8) as u32,
             scan: job.scan,
         };
-        let span = match job.end {
-            Some(e) => e - job.start.unwrap_or(0.0),
-            None => info.duration - job.start.unwrap_or(0.0),
-        };
-        let mut reader = Reader::open(input, &info, r, &opt).map_err(|e| format!("{}: {e}", input.display()))?;
+        let span = end.unwrap_or(info.duration) - start.unwrap_or(0.0);
+        let mut reader = Reader::open(path, &info, r, &opt).map_err(|e| format!("{}: {e}", path.display()))?;
         p.input = k;
         let mut read = 0u64;
         while let Some(frame) = reader.next_frame().map_err(|e| e.to_string())? {

@@ -8,7 +8,7 @@
 //! interpolated within each field for interlaced material.
 
 use std::io::{self, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 /// A command for `ffmpeg` or `ffprobe`: a copy next to our own executable or
@@ -29,6 +29,70 @@ pub fn tool(name: &str) -> Command {
     cmd
 }
 
+/// A recording to read: the whole file, or one stretch of it (a range kept
+/// in a SmartCut project), in seconds from the start of the file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Input {
+    pub path: PathBuf,
+    /// From and to; the end is infinite for "to the end of the file".
+    pub span: Option<(f64, f64)>,
+}
+
+impl Input {
+    pub fn whole(path: PathBuf) -> Input {
+        Input { path, span: None }
+    }
+
+    /// Where to start and stop reading: this input's stretch narrowed by a
+    /// range set for every input. None when the two do not meet.
+    pub fn window(&self, start: Option<f64>, end: Option<f64>) -> Option<(Option<f64>, Option<f64>)> {
+        let Some((a, b)) = self.span else { return Some((start, end)) };
+        let s = start.map_or(a, |s| s.max(a));
+        let e = end.map_or(b, |e| e.min(b));
+        if e <= s {
+            return None;
+        }
+        Some((Some(s), e.is_finite().then_some(e)))
+    }
+
+    /// The file name, after the stretch when there is one (file names of
+    /// recordings are long, and the stretch tells apart those of one file).
+    pub fn label(&self) -> String {
+        let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match self.span {
+            Some((a, b)) if b.is_finite() => format!("[{a:.3}–{b:.3}]  {name}"),
+            Some((a, _)) => format!("[{a:.3}–]  {name}"),
+            None => name,
+        }
+    }
+}
+
+/// Seconds from the start of the file to the first picture a decoder can
+/// start on (the first key frame), as SmartCut counts its ranges from it.
+pub fn first_point(path: &Path) -> f64 {
+    let out = tool("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#600"])
+        .args(["-show_entries", "packet=pts_time,flags:format=start_time", "-of", "default=nw=1"])
+        .arg(path)
+        .output();
+    let Ok(out) = out else { return 0.0 };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (mut start, mut first, mut pts) = (None, None, None);
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        match k {
+            "pts_time" => pts = v.parse::<f64>().ok(),
+            "flags" if first.is_none() && v.starts_with('K') => first = pts,
+            "start_time" => start = v.parse::<f64>().ok(),
+            _ => {}
+        }
+    }
+    match (first, start) {
+        (Some(f), Some(s)) => (f - s).max(0.0),
+        _ => 0.0,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
     pub x: u32,
@@ -44,6 +108,9 @@ pub struct VideoInfo {
     pub frame_rate: f64,
     /// Seconds; 0 when the container does not say.
     pub duration: f64,
+    /// The container's start time in seconds: what every time given here
+    /// (and in SmartCut) is counted from.
+    pub start_time: f64,
     pub pix_fmt: String,
     pub interlaced: bool,
 }
@@ -56,7 +123,7 @@ pub fn probe(path: &Path) -> io::Result<VideoInfo> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,avg_frame_rate,r_frame_rate,pix_fmt,field_order:format=duration",
+            "stream=width,height,avg_frame_rate,r_frame_rate,pix_fmt,field_order:format=duration,start_time",
             "-of",
             "default=nw=1",
         ])
@@ -64,7 +131,7 @@ pub fn probe(path: &Path) -> io::Result<VideoInfo> {
         .output()
         .map_err(|e| io::Error::other(format!("cannot run ffprobe (put ffmpeg and ffprobe on PATH or next to this program): {e}")))?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut info = VideoInfo { width: 0, height: 0, frame_rate: 0.0, duration: 0.0, pix_fmt: String::new(), interlaced: false };
+    let mut info = VideoInfo { width: 0, height: 0, frame_rate: 0.0, duration: 0.0, start_time: 0.0, pix_fmt: String::new(), interlaced: false };
     let rate = |s: &str| -> f64 {
         let mut it = s.split('/');
         let n: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -80,6 +147,7 @@ pub fn probe(path: &Path) -> io::Result<VideoInfo> {
             "avg_frame_rate" if rate(v) > 0.0 => info.frame_rate = rate(v),
             "pix_fmt" => info.pix_fmt = v.to_string(),
             "duration" => info.duration = v.parse().unwrap_or(0.0),
+            "start_time" => info.start_time = v.parse().unwrap_or(0.0),
             "field_order" => info.interlaced = matches!(v, "tt" | "bb" | "tb" | "bt"),
             _ => {}
         }
@@ -94,9 +162,31 @@ pub fn probe(path: &Path) -> io::Result<VideoInfo> {
 /// has its references (a seek into MPEG-2 can land past the I picture).
 const PRE_ROLL: f64 = 2.0;
 
-fn seek_args(at: f64) -> Vec<String> {
-    let at = at.max(0.0);
-    vec!["-ss".into(), format!("{:.3}", (at - PRE_ROLL).max(0.0))]
+/// Reads from `start` seconds for `duration`: options before the input, a
+/// filter to put first in the chain, and options after the input.
+///
+/// Frames are picked by their own timestamps, kept as they are in the file
+/// (-copyts), less the container's start time: the clock SmartCut counts on.
+/// ffmpeg's -ss after the input does not keep to it: near the beginning of a
+/// broadcast recording the seek before the input is dropped and the frames
+/// come out up to a second early, and elsewhere still some frames early.
+/// trim, unlike select, also ends the decoding at the end of the stretch.
+fn window_args(info: &VideoInfo, start: Option<f64>, duration: Option<f64>) -> (Vec<String>, Option<String>, Vec<String>) {
+    // Half a millisecond early, so a frame exactly on the edge counts.
+    const EDGE: f64 = 0.0005;
+    match start {
+        Some(s) => {
+            let s = s.max(0.0);
+            let from = info.start_time + s - EDGE;
+            let pick = match duration {
+                Some(d) => format!("trim=start={from:.6}:end={:.6}", from + d),
+                None => format!("trim=start={from:.6}"),
+            };
+            let input = vec!["-ss".into(), format!("{:.3}", (s - PRE_ROLL).max(0.0)), "-copyts".into()];
+            (input, Some(pick), Vec::new())
+        }
+        None => (Vec::new(), None, duration.map(|d| vec!["-t".into(), format!("{d:.3}")]).unwrap_or_default()),
+    }
 }
 
 /// The matrix AviUtl would pick for this picture: BT.709 from 720 lines up.
@@ -107,14 +197,18 @@ pub fn is_hd(info: &VideoInfo) -> bool {
 /// One whole frame at `at` seconds as packed RGB, for display.
 pub fn grab_rgb(path: &Path, info: &VideoInfo, at: f64) -> io::Result<Vec<u8>> {
     let matrix = if is_hd(info) { "bt709" } else { "bt601" };
+    let (input, pick, _) = window_args(info, Some(at), None);
+    let mut vf = format!("scale=in_color_matrix={matrix}:in_range=tv:out_range=pc:flags=bilinear,format=rgb24");
+    if let Some(p) = pick {
+        vf = format!("{p},{vf}");
+    }
     let out = tool("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
-        .args(seek_args(at))
+        .args(input)
         .arg("-i")
         .arg(path)
-        .args(["-ss", &format!("{:.3}", at.clamp(0.0, PRE_ROLL))])
-        .args(["-map", "0:v:0", "-frames:v", "1", "-an", "-sn", "-dn"])
-        .args(["-vf", &format!("scale=in_color_matrix={matrix}:in_range=tv:out_range=pc:flags=bilinear,format=rgb24")])
+        .args(["-map", "0:v:0", "-frames:v", "1", "-an", "-sn", "-dn", "-fps_mode", "passthrough"])
+        .args(["-vf", &vf])
         .args(["-f", "rawvideo", "pipe:1"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -133,16 +227,15 @@ pub fn grab_rgb(path: &Path, info: &VideoInfo, at: f64) -> io::Result<Vec<u8>> {
 /// for display: picked by number, as the moving-logo analysis counts them.
 pub fn grab_rgb_frame(path: &Path, info: &VideoInfo, start: Option<f64>, n: u64) -> io::Result<Vec<u8>> {
     let matrix = if is_hd(info) { "bt709" } else { "bt601" };
+    let (input, pick, _) = window_args(info, start, None);
     let mut cmd = tool("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
-    if let Some(s) = start {
-        cmd.args(seek_args(s));
-    }
+    cmd.args(input);
     cmd.arg("-i").arg(path);
-    if let Some(s) = start {
-        cmd.args(["-ss", &format!("{:.3}", s.clamp(0.0, PRE_ROLL))]);
+    let mut vf = format!("select='eq(n\\,{n})',scale=in_color_matrix={matrix}:in_range=tv:out_range=pc:flags=bilinear,format=rgb24");
+    if let Some(p) = pick {
+        vf = format!("{p},{vf}");
     }
-    let vf = format!("select='eq(n\\,{n})',scale=in_color_matrix={matrix}:in_range=tv:out_range=pc:flags=bilinear,format=rgb24");
     let out = cmd
         .args(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", &vf, "-fps_mode", "passthrough", "-frames:v", "1"])
         .args(["-f", "rawvideo", "pipe:1"])
@@ -243,19 +336,16 @@ impl Reader {
         if opt.step > 1 {
             vf = format!("select='not(mod(n\\,{}))',{vf}", opt.step);
         }
+        let (input, pick, output) = window_args(info, opt.start, opt.duration);
+        if let Some(p) = pick {
+            vf = format!("{p},{vf}");
+        }
         let mut cmd = tool("ffmpeg");
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         cmd.args(["-threads", &opt.threads.to_string()]);
-        if let Some(s) = opt.start {
-            cmd.args(seek_args(s));
-        }
+        cmd.args(input);
         cmd.arg("-i").arg(path);
-        if let Some(s) = opt.start {
-            cmd.args(["-ss", &format!("{:.3}", s.clamp(0.0, PRE_ROLL))]);
-        }
-        if let Some(d) = opt.duration {
-            cmd.args(["-t", &format!("{d:.3}")]);
-        }
+        cmd.args(output);
         cmd.args(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", &vf, "-fps_mode", "passthrough"]);
         cmd.args(["-f", "rawvideo", "pipe:1"]);
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit());

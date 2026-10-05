@@ -16,6 +16,9 @@ const USAGE: &str = "\
 lgdscan - logo analysis compatible with the AviUtl logo plugin
 
 usage:
+  An INPUT may be a SmartCut project (.scproj): every range it keeps is read
+  as one input.
+
   lgdscan scan INPUT... --rect X,Y,W,H [options]
       -o, --output FILE      .lgd to write (default: <name>.lgd)
       -n, --name NAME        logo name (default: output file stem)
@@ -140,7 +143,7 @@ fn cmd_scan(args: &[String]) -> Res {
     let output = output.unwrap_or_else(|| PathBuf::from(format!("{}.lgd", name.as_deref().unwrap_or("logo"))));
     let name = name.unwrap_or_else(|| output.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
     lgd::encode_name(&name).map_err(|bad| format!("the name has characters CP932 cannot hold: {bad}"))?;
-    let mut job = Job::new(inputs, rect);
+    let mut job = Job::new(lgdscan::scproj::expand(&inputs)?, rect);
     job.start = start;
     job.end = end;
     job.step = step;
@@ -216,6 +219,7 @@ fn cmd_anim(args: &[String]) -> Res {
         }
     }
     let rect = rect.ok_or("--rect is required (the area the whole animation plays in)")?;
+    let inputs = lgdscan::scproj::expand(&inputs)?;
     let mut job = AnimJob::new(inputs.clone(), rect);
     job.start = start;
     job.end = end;
@@ -241,7 +245,7 @@ fn cmd_anim(args: &[String]) -> Res {
     eprintln!();
     let out = out?;
     for (input, s) in inputs.iter().zip(&out.starts) {
-        eprintln!("  starts at frame {s:5}  {}", input.display());
+        eprintln!("  starts at frame {s:5}  {}", input.label());
     }
     let n = out.frames.len();
     let least = out.frames.iter().map(|f| f.samples).min().unwrap_or(0);
