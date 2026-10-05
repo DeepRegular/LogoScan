@@ -158,21 +158,20 @@ delogomod に付いている例（`end=start+218, fadeout=28`）では、この�
 `lgdscan anim` は .ldp と一緒に必ず書きます。画面では、保存のときに「サンプルの .avs も書く」が付いていれば書きます。
 あとから作るなら `lgdscan avs ロゴ.ldp --end 232 --fadeout 22` か `lgdscan avs ロゴ.lgd` です。
 
-.ldp には delogomod の `EraseLogomod` を包んだ関数を書きます（`end` と `fadeout` は測った値が既定値になります）。
+.ldp には delogomod の `EraseLogomod` の呼び出しをそのまま書きます（`end` と `fadeout` は測った値）。
 
 ```
-function EraseMovingLogo(clip c, int "start", int "length", int "fadeout")
-{
-  start = default(start, 0)
-  length = default(length, 232)
-  fadeout = default(fadeout, 22)
-  return c.EraseLogomod(logofile="anim.ldp", start=start, end=start+length, fadeout=fadeout)
-}
-#EraseMovingLogo(16)
+#EraseLogomod(logofile="anim.ldp", start=16, end=16+232, fadeout=22)
+#EraseLogomod(logofile="anim.ldp", start=0, end=232-20, fadeout=22, logo_start=20)
 ```
 
-.lgd には delogo の `EraseLOGO` を包んだ関数を書きます（`EraseStillLogo(start, end, fadein, fadeout)`、`end` を省くと最後まで）。
-録画の読み込みや `LoadPlugin` は書きません。自分のスクリプトに取り込んで使ってください。
+.lgd には delogo の `EraseLOGO` を、本編の区間ごとにつないだ形で書きます。
+
+```
+#EraseLOGO(logofile="logo.lgd", start=300, end=15299, interlaced=true).EraseLOGO(logofile="logo.lgd", start=18000, end=32399, interlaced=true)
+```
+
+フレーム番号は例です。録画の読み込みや `LoadPlugin` は書きません。自分のスクリプトにコピーして使ってください。
 
 ## ロゴの位置の検出
 

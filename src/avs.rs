@@ -15,52 +15,24 @@ pub fn moving(ldp: &str, frames: usize, hold: Option<Hold>) -> String {
     };
     let mut s = String::new();
     s.push_str(&format!("# {ldp} を delogomod で使うサンプル（lgdscan が書きました）\n"));
-    s.push_str("#\n");
-    s.push_str(&format!("# {ldp} には、アニメーションのロゴが 1 フレームずつ {frames} 枚入っています。\n"));
-    s.push_str("# EraseLogomod はこれを start から上から順に当て、使い切ったあとは最後の 1 枚（止まったロゴ）を\n");
-    s.push_str("# end まで当て続け、最後の fadeout フレームで薄くしていきます。\n");
+    s.push_str(&format!("# アニメーションのロゴが 1 フレームずつ {frames} 枚入っています。start には、ロゴがうっすら出始めるフレームを入れます。\n"));
     s.push_str(&format!("# {note}\n"));
-    s.push_str("# start には、録画でアニメーションの最初のフレーム（ロゴがうっすら出始めるところ）を入れます。\n");
+    s.push_str("# 録画がアニメーションの途中から始まるときは、過ぎたフレーム数を logo_start に入れます。\n");
     s.push('\n');
-    s.push_str("#LoadPlugin(\"delogomod.dll\")\n");
-    s.push('\n');
-    s.push_str("function EraseMovingLogo(clip c, int \"start\", int \"length\", int \"fadeout\")\n");
-    s.push_str("{\n");
-    s.push_str("  start = default(start, 0)\n");
-    s.push_str(&format!("  length = default(length, {length})\n"));
-    s.push_str(&format!("  fadeout = default(fadeout, {fadeout})\n"));
-    s.push_str(&format!("  return c.EraseLogomod(logofile=\"{ldp}\", start=start, end=start+length, fadeout=fadeout)\n"));
-    s.push_str("}\n");
-    s.push('\n');
-    s.push_str("# 例: 16 フレーム目からアニメーションが始まるとき\n");
-    s.push_str("#EraseMovingLogo(16)\n");
-    s.push_str("# 1 本の録画に何回も出てくるときは、そのぶん並べます\n");
-    s.push_str("#EraseMovingLogo(16).EraseMovingLogo(32400)\n");
+    s.push_str(&format!("#EraseLogomod(logofile=\"{ldp}\", start=16, end=16+{length}, fadeout={fadeout})\n"));
+    s.push_str(&format!("#EraseLogomod(logofile=\"{ldp}\", start=32392, end=32392+{length}, fadeout={fadeout})\n"));
+    s.push_str(&format!("#EraseLogomod(logofile=\"{ldp}\", start=0, end={length}-20, fadeout={fadeout}, logo_start=20)\n"));
     s.replace('\n', "\r\n")
 }
 
-/// For a still logo: delogo's EraseLOGO over a range of frames.
+/// For a still logo: delogo's EraseLOGO, one call per stretch of the
+/// programme so the logo is not "removed" during commercials.
 pub fn still(lgd: &str) -> String {
     let mut s = String::new();
     s.push_str(&format!("# {lgd} を delogo で使うサンプル（lgdscan が書きました）\n"));
-    s.push_str("#\n");
-    s.push_str("# start から end までロゴを消します。end を省くと最後まで消します。\n");
-    s.push_str("# CM などロゴの出ていないところを含めるときは、範囲を分けて並べてください。\n");
-    s.push_str("# interlaced は、インターレースの録画（放送の 1080i など）なら true にします。\n");
+    s.push_str("# 本編の区間ごとに start と end を入れて並べます。CM の間は消さないでください（ロゴの形が浮き出ます）。\n");
     s.push('\n');
-    s.push_str("#LoadPlugin(\"delogo.dll\")\n");
-    s.push('\n');
-    s.push_str("function EraseStillLogo(clip c, int \"start\", int \"end\", int \"fadein\", int \"fadeout\")\n");
-    s.push_str("{\n");
-    s.push_str(&format!(
-        "  return c.EraseLOGO(logofile=\"{lgd}\", start=default(start, 0), end=default(end, -1), fadein=default(fadein, 0), fadeout=default(fadeout, 0), interlaced=true)\n"
-    ));
-    s.push_str("}\n");
-    s.push('\n');
-    s.push_str("# 例: 録画全体から消す\n");
-    s.push_str("#EraseStillLogo()\n");
-    s.push_str("# 例: 300〜25000 フレーム目だけ、前後 15 フレームでフェードさせて消す\n");
-    s.push_str("#EraseStillLogo(300, 25000, 15, 15)\n");
+    s.push_str(&format!("#EraseLOGO(logofile=\"{lgd}\", start=300, end=15299, interlaced=true).EraseLOGO(logofile=\"{lgd}\", start=18000, end=32399, interlaced=true)\n"));
     s.replace('\n', "\r\n")
 }
 
@@ -98,15 +70,13 @@ mod tests {
     #[test]
     fn moving_sample_carries_the_measured_hold() {
         let t = moving("anim.ldp", 106, Some(Hold { end: 232, fadeout: 22 }));
-        assert!(t.contains("c.EraseLogomod(logofile=\"anim.ldp\", start=start, end=start+length, fadeout=fadeout)\r\n"));
-        assert!(t.contains("length = default(length, 232)\r\n"));
-        assert!(t.contains("fadeout = default(fadeout, 22)\r\n"));
+        assert!(t.contains("#EraseLogomod(logofile=\"anim.ldp\", start=16, end=16+232, fadeout=22)\r\n"));
         assert_eq!(t.matches("\r\n").count(), t.matches('\n').count());
     }
 
     #[test]
     fn still_sample_names_the_file() {
         let t = still("ロゴ.lgd");
-        assert!(t.contains("EraseLOGO(logofile=\"ロゴ.lgd\""));
+        assert!(t.contains("EraseLOGO(logofile=\"ロゴ.lgd\", start=300, end=15299, interlaced=true)"));
     }
 }

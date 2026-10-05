@@ -167,21 +167,20 @@ Each logo file gets a sample of how to use it, an .avs of the same name (CP932, 
 always writes one beside the .ldp; the window writes one on saving while *also write a sample .avs* is ticked;
 `lgdscan avs logo.ldp --end 232 --fadeout 22` or `lgdscan avs logo.lgd` writes one afterwards.
 
-For an .ldp it is a function around delogomod's `EraseLogomod`, the measured `end` and `fadeout` as defaults:
+For an .ldp it is a plain call of delogomod's `EraseLogomod`, with the measured `end` and `fadeout`:
 
 ```
-function EraseMovingLogo(clip c, int "start", int "length", int "fadeout")
-{
-  start = default(start, 0)
-  length = default(length, 232)
-  fadeout = default(fadeout, 22)
-  return c.EraseLogomod(logofile="anim.ldp", start=start, end=start+length, fadeout=fadeout)
-}
-#EraseMovingLogo(16)
+#EraseLogomod(logofile="anim.ldp", start=16, end=16+232, fadeout=22)
+#EraseLogomod(logofile="anim.ldp", start=0, end=232-20, fadeout=22, logo_start=20)
 ```
 
-For an .lgd it is one around delogo's `EraseLOGO` (`EraseStillLogo(start, end, fadein, fadeout)`, no `end` meaning
-to the last frame). Opening the recording and `LoadPlugin` are left to your own script.
+For an .lgd it is delogo's `EraseLOGO`, one call per stretch of the programme:
+
+```
+#EraseLOGO(logofile="logo.lgd", start=300, end=15299, interlaced=true).EraseLOGO(logofile="logo.lgd", start=18000, end=32399, interlaced=true)
+```
+
+The frame numbers are examples. Opening the recording and `LoadPlugin` are left to your own script.
 
 ## Finding the logo
 
