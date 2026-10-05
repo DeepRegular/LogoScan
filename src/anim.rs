@@ -1212,28 +1212,35 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
         ));
     }
     // 6. How long the still logo stays, and how it fades: per recording and
-    // frame, the depth at which removing it leaves its edges flattest.
-    begin(Stage::Fade);
+    // frame, the depth at which removing it leaves its edges flattest. A
+    // still logo that cannot be trusted cannot measure that either.
     let a0 = k0 + first as i64;
-    let rest = k0 + last as i64;
-    let srect = Rect { x: still.x as u32, y: still.y as u32, w: still.w as u32, h: still.h as u32 };
-    let band = edge_band(&still);
-    let depths = for_inputs(&inputs, job.threads, cancel, &|c, input| {
-        let mut v = Vec::new();
-        read_all(input, srect, &opt, |f, fr| {
-            let t = f as i64 - off[c];
-            if t > rest {
-                v.push((t - a0, depth(&still, &fr.y, &band)));
-            }
-            true
+    let hold = if still_ok {
+        begin(Stage::Fade);
+        let rest = k0 + last as i64;
+        let srect = Rect { x: still.x as u32, y: still.y as u32, w: still.w as u32, h: still.h as u32 };
+        let band = edge_band(&still);
+        let depths = for_inputs(&inputs, job.threads, cancel, &|c, input| {
+            let mut v = Vec::new();
+            read_all(input, srect, &opt, |f, fr| {
+                let t = f as i64 - off[c];
+                if t > rest {
+                    v.push((t - a0, depth(&still, &fr.y, &band)));
+                }
+                true
+            })?;
+            tick(Stage::Fade);
+            Ok(v)
         })?;
-        tick(Stage::Fade);
-        Ok(v)
-    })?;
-    let hold = fit_fade(&depths, rest - a0);
-    if hold.is_none() {
-        warnings.push("止まったロゴが消えるところまで録画に入っていないので、end と fadeout は測れませんでした".into());
-    }
+        let hold = fit_fade(&depths, rest - a0);
+        if hold.is_none() {
+            warnings.push("止まったロゴが消えるところまで録画に入っていないので、end と fadeout は測れませんでした".into());
+        }
+        hold
+    } else {
+        warnings.push("止まったロゴが当てにならないので、end と fadeout は測っていません".into());
+        None
+    };
     let starts = off.iter().map(|o| o + a0).collect();
     Ok(AnimOutcome { frames, warnings, still, starts, hold })
 }
