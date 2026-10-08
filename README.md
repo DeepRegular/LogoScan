@@ -55,11 +55,12 @@ Recordings can also be dropped on the window (hold Shift to add to the inputs in
      Past 2× the pixels are shown as they are.
 3. **Analyse.** When it finishes, the logo appears on a checkerboard — in its own colours, as translucent as
    it is — and the picture switches to the logo removed. Move the slider to see how it holds up on other scenes.
-4. Name the logo and **Save**.
-5. **ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) reads the recording again
-   (see "Where the logo is on screen" below); the call in the results and the sample .avs written in step 4 take
-   the measured fades (`fadein`, `fadeout`). **この録画用の .avs を保存…** (Save an .avs for this recording) writes
-   that recording's own script, one call per stretch measured.
+4. Name the logo. **ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) reads the
+   recording again (see "Where the logo is on screen" below); the call in the results takes the measured fades
+   (`fadein`, `fadeout`). Skip it if you do not need the fades.
+5. **Save**. The sample .avs takes the measured fades too.
+6. **この録画用の .avs を保存…** (Save an .avs for this recording) writes that recording's own script, one call
+   per stretch measured, if you want one.
 
 For a moving logo, switch *Analyse* to **Moving logo** (see "A logo that moves" below). Open many recordings
 (*Add…*, or drop with Shift held), box the area the animation passes through and press **Analyse**. The result

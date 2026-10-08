@@ -1242,13 +1242,6 @@ impl App {
                         ui.label(egui::RichText::new(format!("CP932 で {} / {} バイト", b.len(), lgd::NAME_MAX_V1)).small().weak());
                     }
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("保存…").clicked() {
-                        self.save_lgd();
-                    }
-                    ui.checkbox(&mut self.write_sample, "サンプルの .avs も書く")
-                        .on_hover_text("delogo での使い方を、.lgd と同じ名前の .avs に書きます");
-                });
                 if self.info.is_some() {
                     ui.horizontal(|ui| {
                         if let Some(t) = &self.spans_task {
@@ -1275,6 +1268,20 @@ impl App {
                     ui.label(format!("ロゴの出ている区間 {} か所", spans.len()));
                     ui.label(format!("{}・{}", fade("フェードイン", fades.fadein), fade("フェードアウト", fades.fadeout)));
                 }
+                if let Some(call) = self.still_call() {
+                    ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
+                    let hover = if self.range_on { "指定した範囲での呼び方" } else { "録画全体での呼び方（CM の間は外してください）" };
+                    if ui.button("コピー").on_hover_text(hover).clicked() {
+                        ctx.copy_text(call);
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("保存…").clicked() {
+                        self.save_lgd();
+                    }
+                    ui.checkbox(&mut self.write_sample, "サンプルの .avs も書く")
+                        .on_hover_text("delogo での使い方を、.lgd と同じ名前の .avs に書きます");
+                });
                 if let Some(rec) = self.recording_call() {
                     if ui
                         .button("この録画用の .avs を保存…")
@@ -1282,13 +1289,6 @@ impl App {
                         .clicked()
                     {
                         self.save_recording_avs(&rec);
-                    }
-                }
-                if let Some(call) = self.still_call() {
-                    ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
-                    let hover = if self.range_on { "指定した範囲での呼び方" } else { "録画全体での呼び方（CM の間は外してください）" };
-                    if ui.button("コピー").on_hover_text(hover).clicked() {
-                        ctx.copy_text(call);
                     }
                 }
             } else {
