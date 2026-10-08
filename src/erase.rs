@@ -38,15 +38,14 @@ pub fn yc_to_rgb(y: i16, cb: i16, cr: i16, hd: bool) -> [u8; 3] {
 }
 
 /// The logo for display: its colour laid over a dark checkerboard with
-/// its opacity, stretched so the most opaque pixel shows fully. Showing the
-/// opacity alone turns a logo drawn in colours on an evenly translucent
-/// plate into a blank white shape.
+/// its own opacity, as it is laid over the picture. Showing the opacity
+/// alone turns a logo drawn in colours on an evenly translucent plate into
+/// a blank white shape.
 pub fn logo_to_rgb(logo: &Logo, hd: bool) -> Vec<u8> {
-    let max = logo.pixels.iter().map(|p| p.dp_y).max().unwrap_or(1).max(1) as f32;
     let w = logo.w.max(1) as usize;
     let mut out = Vec::with_capacity(logo.pixels.len() * 3);
     for (i, p) in logo.pixels.iter().enumerate() {
-        let a = (p.dp_y.max(0) as f32 / max).min(1.0);
+        let a = (p.dp_y.max(0) as f32 / LOGO_MAX_DP as f32).min(1.0);
         let back = if (i % w / 4 + i / w / 4) & 1 == 0 { 40.0 } else { 64.0 };
         let c = yc_to_rgb(p.y, p.cb, p.cr, hd);
         out.extend(c.map(|v| (back + (v as f32 - back) * a).round() as u8));
