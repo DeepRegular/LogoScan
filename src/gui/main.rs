@@ -104,6 +104,9 @@ impl<T: Send + 'static> Task<T> {
 
 struct Grabbed {
     time: f64,
+    /// The picture size of the frame, which may be from an input no longer
+    /// shown.
+    size: (u32, u32),
     /// For a moving logo: the input and frame shown.
     frame: Option<(usize, u64)>,
     rgb: Vec<u8>,
@@ -116,6 +119,15 @@ enum Mode {
     Moving,
 }
 
+/// A moving-logo analysis with what it was run on: the inputs, the start
+/// of the range, and where that start is in each input, in frames.
+struct AnimRun {
+    outcome: AnimOutcome,
+    inputs: Vec<PathBuf>,
+    start: Option<f64>,
+    offsets: Vec<i64>,
+}
+
 /// A moving logo: one logo per frame of the animation.
 struct Anim {
     logos: Vec<Logo>,
@@ -123,6 +135,8 @@ struct Anim {
     still: Option<Logo>,
     /// Per input: where the animation starts, in frames from `start`.
     starts: Vec<(PathBuf, i64)>,
+    /// Per input: the frame `start` falls on, counted from the first.
+    offsets: Vec<i64>,
     /// What the frames were counted from (the range, when one was set).
     start: Option<f64>,
     /// Recordings each frame was fitted on.
@@ -134,7 +148,7 @@ struct Anim {
     input: usize,
     tex: Option<(usize, TextureHandle)>,
     /// What ffprobe said about the inputs looked at.
-    infos: std::collections::HashMap<usize, VideoInfo>,
+    infos: std::collections::HashMap<usize, Option<VideoInfo>>,
 }
 
 #[derive(Clone, Copy)]
@@ -170,11 +184,15 @@ impl View {
 struct App {
     inputs: Vec<PathBuf>,
     info: Option<VideoInfo>,
+    /// The time of the first picture of the first input: frame 0.
+    first: Option<f64>,
     status: String,
 
     time: f64,
     shown_time: Option<f64>,
     frame_rgb: Option<Vec<u8>>,
+    /// The size of the picture in `frame_rgb` and `erased_rgb`.
+    frame_size: (u32, u32),
     erased_rgb: Option<Vec<u8>>,
     frame_tex: Option<TextureHandle>,
     tex_nearest: bool,
@@ -215,7 +233,7 @@ struct App {
 
     mode: Mode,
     search: usize,
-    anim_task: Option<Task<AnimOutcome>>,
+    anim_task: Option<Task<AnimRun>>,
     anim: Option<Anim>,
     /// Showing a frame of the animation rather than the time on the slider.
     anim_preview: bool,
@@ -229,10 +247,12 @@ impl Default for App {
         App {
             inputs: Vec::new(),
             info: None,
+            first: None,
             status: "録画ファイルをウィンドウに落とすか、「開く…」で選んでください".into(),
             time: 0.0,
             shown_time: None,
             frame_rgb: None,
+            frame_size: (0, 0),
             erased_rgb: None,
             frame_tex: None,
             tex_nearest: false,
@@ -321,9 +341,15 @@ impl App {
                 if self.rect.w == 0 || self.rect.x + self.rect.w > info.width || self.rect.y + self.rect.h > info.height {
                     self.rect = Rect { x: info.width * 3 / 4, y: info.height / 20, w: info.width / 6, h: info.height / 12 };
                 }
+                self.first = source::first_picture(first).ok();
                 self.info = Some(info);
                 self.inputs = inputs;
                 self.view.fit = true;
+                // A detection still running is of the previous recording.
+                if let Some(t) = self.detect_task.take() {
+                    t.cancel.store(true, Ordering::Relaxed);
+                }
+                self.leave_anim_preview();
                 self.detection = None;
                 self.candidates.clear();
                 self.presence_tex = None;
@@ -344,7 +370,7 @@ impl App {
                 self.status = format!("{} を読みました（動くロゴ、{} フレーム）", path.display(), logos.len());
                 self.mode = Mode::Moving;
                 let samples = vec![0; logos.len()];
-                self.anim = Some(Anim { logos, still: None, starts: Vec::new(), start: None, samples, hold: None, k: 0, input: 0, tex: None, infos: Default::default() });
+                self.anim = Some(Anim { logos, still: None, starts: Vec::new(), offsets: Vec::new(), start: None, samples, hold: None, k: 0, input: 0, tex: None, infos: Default::default() });
                 self.anim_preview = false;
             }
             Ok(logos) if !logos.is_empty() => {
@@ -367,6 +393,10 @@ impl App {
         self.logo = Some(logo);
         self.outcome = outcome;
         self.spans = None;
+        // Stretches still being looked for are of the previous logo.
+        if let Some(t) = self.spans_task.take() {
+            t.cancel.store(true, Ordering::Relaxed);
+        }
         self.erased_rgb = None;
         self.frame_tex = None;
         if self.show_erased {
@@ -390,7 +420,7 @@ impl App {
                     self.grab = Some(Task::spawn(ctx, move |_, _| {
                         let rgb = source::grab_rgb_frame(&path, &info, start, n).map_err(|e| e.to_string())?;
                         let erased = logo.and_then(|l| erased_frame(&path, &info, &l, start, n, &rgb).ok());
-                        Ok(Grabbed { time: at, frame: Some((input, n)), rgb, erased })
+                        Ok(Grabbed { time: at, size: (info.width, info.height), frame: Some((input, n)), rgb, erased })
                     }));
                     return;
                 }
@@ -402,7 +432,7 @@ impl App {
         self.grab = Some(Task::spawn(ctx, move |_, _| {
             let rgb = source::grab_rgb(&path, &info, at).map_err(|e| e.to_string())?;
             let erased = logo.and_then(|l| erased_picture(&path, &info, &l, at, &rgb).ok());
-            Ok(Grabbed { time: at, frame: None, rgb, erased })
+            Ok(Grabbed { time: at, size: (info.width, info.height), frame: None, rgb, erased })
         }));
     }
 
@@ -415,6 +445,7 @@ impl App {
                     self.shown_time = Some(g.time);
                     self.shown_frame = g.frame;
                     self.frame_rgb = Some(g.rgb);
+                    self.frame_size = g.size;
                     self.erased_rgb = g.erased;
                     self.frame_tex = None;
                 }
@@ -469,7 +500,8 @@ impl App {
         let Some(r) = self.anim_task.as_ref().and_then(|t| t.poll()) else { return };
         self.anim_task = None;
         match r {
-            Ok(o) => {
+            Ok(run) => {
+                let o = run.outcome;
                 let logos: Vec<Logo> = o
                     .frames
                     .iter()
@@ -489,14 +521,17 @@ impl App {
                 for w in &o.warnings {
                     self.status = format!("{}。{w}", self.status);
                 }
-                let starts = self.inputs.iter().cloned().zip(o.starts.iter().copied()).collect();
-                let start = if self.range_on { Some(self.range.0) } else { None };
+                // The inputs as they were when the analysis started: the
+                // list may have changed since.
+                let starts = run.inputs.into_iter().zip(o.starts.iter().copied()).collect();
+                let (start, offsets) = (run.start, run.offsets);
                 self.anim = Some(Anim {
                     samples: o.frames.iter().map(|f| f.samples).collect(),
                     hold: o.hold,
                     logos,
                     still: Some(o.still),
                     starts,
+                    offsets,
                     start,
                     k: 0,
                     input: 0,
@@ -527,7 +562,7 @@ impl App {
         job.scan = self.scan;
         job.search = self.search;
         self.anim_task = Some(Task::spawn(ctx, move |cancel, report| {
-            anim::run(
+            let outcome = anim::run(
                 &job,
                 &|p| {
                     let (i, what) = match p.stage {
@@ -542,7 +577,22 @@ impl App {
                     report(f as f32, format!("{what}  {}/{} 本", p.done, p.total));
                 },
                 cancel,
-            )
+            )?;
+            // The starts count from the range; the call counts from the
+            // first picture of each recording.
+            let offsets = match job.start {
+                None => vec![0; job.inputs.len()],
+                Some(s) => job
+                    .inputs
+                    .iter()
+                    .map(|p| {
+                        let info = source::probe(p).map_err(|e| e.to_string())?;
+                        let first = source::first_picture(p).map_err(|e| e.to_string())?;
+                        Ok(source::clock_frame(&info, first, s) as i64)
+                    })
+                    .collect::<Result<_, String>>()?,
+            };
+            Ok(AnimRun { outcome, inputs: job.inputs, start: job.start, offsets })
         }));
     }
 
@@ -579,7 +629,9 @@ impl App {
         if info.frame_rate <= 0.0 {
             return None;
         }
-        let frame = |t: f64| (t * info.frame_rate).round() as u64;
+        // Frame 0 is the first picture that decodes, as AviSynth counts.
+        let first = self.first.unwrap_or(info.start_time);
+        let frame = |t: f64| source::clock_frame(info, first, t);
         let (start, end) = if self.range_on {
             (frame(self.range.0), frame(self.range.1).saturating_sub(1))
         } else {
@@ -702,12 +754,18 @@ impl App {
                     }
                 }
             });
-            let (p, st) = &a.starts[a.input.min(a.starts.len() - 1)];
+            let i = a.input.min(a.starts.len() - 1);
+            let (p, st) = &a.starts[i];
+            let st = st + a.offsets.get(i).copied().unwrap_or(0);
             let file = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let ldp = if self.name.is_empty() { "anim.ldp".to_string() } else { format!("{}.ldp", self.name) };
-            let call = match a.hold {
-                Some(h) => format!("EraseLogomod(logofile=\"{ldp}\", start={st}, end={st}+{}, fadeout={})", h.end, h.fadeout),
-                None => format!("EraseLogomod(logofile=\"{ldp}\", start={st})"),
+            // Begun before the recording's first frame: from frame 0, with
+            // the logos already played skipped (logo_start).
+            let call = match (a.hold, st < 0) {
+                (Some(h), false) => format!("EraseLogomod(logofile=\"{ldp}\", start={st}, end={st}+{}, fadeout={})", h.end, h.fadeout),
+                (None, false) => format!("EraseLogomod(logofile=\"{ldp}\", start={st})"),
+                (Some(h), true) => format!("EraseLogomod(logofile=\"{ldp}\", start=0, end={}, fadeout={}, logo_start={})", h.end + st, h.fadeout, -st),
+                (None, true) => format!("EraseLogomod(logofile=\"{ldp}\", start=0, logo_start={})", -st),
             };
             // Wrapped on its own line: at the normal size it is wider than
             // the panel.
@@ -1079,7 +1137,7 @@ impl App {
                     t.cancel.store(true, Ordering::Relaxed);
                 }
             } else if ui
-                .add_enabled(self.info.is_some() && self.anim_task.is_none(), egui::Button::new("解析開始").min_size(Vec2::new(120.0, 28.0)))
+                .add_enabled(self.info.is_some() && self.anim_task.is_none() && self.spans_task.is_none(), egui::Button::new("解析開始").min_size(Vec2::new(120.0, 28.0)))
                 .clicked()
             {
                 self.start_scan(&ctx);
@@ -1187,11 +1245,12 @@ impl App {
         let a = self.anim.as_mut()?;
         let i = a.input;
         if let Some(v) = a.infos.get(&i) {
-            return Some(v.clone());
+            return v.clone();
         }
-        let info = source::probe(&a.starts.get(i)?.0).ok()?;
+        // A failure is kept too: this runs on every repaint.
+        let info = a.starts.get(i).and_then(|(p, _)| source::probe(p).ok());
         a.infos.insert(i, info.clone());
-        Some(info)
+        info
     }
 
     fn leave_anim_preview(&mut self) {
@@ -1285,7 +1344,9 @@ impl App {
         let want_erased = self.show_erased && self.erased_rgb.is_some();
         if self.frame_tex.is_none() || self.tex_nearest != nearest || self.tex_erased != want_erased {
             let src = if want_erased { self.erased_rgb.as_ref() } else { self.frame_rgb.as_ref() };
-            if let Some(rgb) = src {
+            // A frame of another size is from the input shown before; the
+            // one asked for since is on its way.
+            if let Some(rgb) = src.filter(|_| self.frame_size == (info.width, info.height)) {
                 let img = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], rgb);
                 let opt = if nearest { TextureOptions::NEAREST } else { TextureOptions::LINEAR };
                 self.frame_tex = Some(ctx.load_texture("frame", img, opt));
@@ -1372,8 +1433,8 @@ impl App {
                     Drag::Move { from, start } => {
                         let dx = (ip.x - from.x).round() as i64;
                         let dy = (ip.y - from.y).round() as i64;
-                        let x0 = (start.x as i64 + dx).clamp(0, info.width as i64 - start.w as i64);
-                        let y0 = (start.y as i64 + dy).clamp(0, info.height as i64 - start.h as i64);
+                        let x0 = (start.x as i64 + dx).clamp(0, (info.width as i64 - start.w as i64).max(0));
+                        let y0 = (start.y as i64 + dy).clamp(0, (info.height as i64 - start.h as i64).max(0));
                         (x0, y0, x0 + start.w as i64, y0 + start.h as i64)
                     }
                     Drag::Resize { left, top, right, bottom, start } => {
@@ -1418,11 +1479,12 @@ impl App {
             if dx != 0 || dy != 0 {
                 let mut q = self.rect;
                 if shift {
-                    q.w = (q.w as i64 + dx).clamp(3, info.width as i64 - q.x as i64) as u32;
-                    q.h = (q.h as i64 + dy).clamp(3, info.height as i64 - q.y as i64) as u32;
+                    // The box may be larger than a preview of another size.
+                    q.w = (q.w as i64 + dx).clamp(3, (info.width as i64 - q.x as i64).max(3)) as u32;
+                    q.h = (q.h as i64 + dy).clamp(3, (info.height as i64 - q.y as i64).max(3)) as u32;
                 } else {
-                    q.x = (q.x as i64 + dx).clamp(0, info.width as i64 - q.w as i64) as u32;
-                    q.y = (q.y as i64 + dy).clamp(0, info.height as i64 - q.h as i64) as u32;
+                    q.x = (q.x as i64 + dx).clamp(0, (info.width as i64 - q.w as i64).max(0)) as u32;
+                    q.y = (q.y as i64 + dy).clamp(0, (info.height as i64 - q.h as i64).max(0)) as u32;
                 }
                 self.rect = q;
             }

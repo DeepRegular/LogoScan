@@ -98,6 +98,12 @@ pub fn run(job: &Job, progress: &mut dyn FnMut(&Progress), cancel: &AtomicBool) 
         max_frames: job.max_frames,
         robust_passes: job.passes,
     };
+    if !(job.threshold.is_finite() && job.threshold > 0.0) {
+        return Err("閾値は 0 より大きい数にしてください".into());
+    }
+    if job.max_frames < 2 {
+        return Err("使うフレーム数は 2 以上にしてください".into());
+    }
     let mut scanner = Scanner::new(r.w as usize, r.h as usize, params);
     let mut p = Progress { inputs: job.inputs.len(), ..Default::default() };
     for (k, input) in job.inputs.iter().enumerate() {
@@ -110,6 +116,7 @@ pub fn run(job: &Job, progress: &mut dyn FnMut(&Progress), cancel: &AtomicBool) 
             scan: job.scan,
             on_the_clock: false,
         };
+        opt.check()?;
         let span = match job.end {
             Some(e) => e - job.start.unwrap_or(0.0),
             None => info.duration - job.start.unwrap_or(0.0),
@@ -117,7 +124,7 @@ pub fn run(job: &Job, progress: &mut dyn FnMut(&Progress), cancel: &AtomicBool) 
         let mut reader = Reader::open(input, &info, r, &opt).map_err(|e| format!("{}: {e}", input.display()))?;
         p.input = k;
         let mut read = 0u64;
-        while let Some(frame) = reader.next_frame().map_err(|e| e.to_string())? {
+        while let Some(frame) = reader.next_frame().map_err(|e| format!("{}: {e}", input.display()))? {
             if cancel.load(Ordering::Relaxed) {
                 return Err("中止しました".into());
             }

@@ -198,7 +198,7 @@ fn pair_scores(a: &[Vec<u64>], b: &[Vec<u64>], ca: &[u32], cb: &[u32], cells: f6
 fn first_offsets(d: &[Vec<Vec<bool>>], search: usize) -> Vec<i64> {
     let n = d.len();
     let s = search as i64;
-    let cells = d.iter().find_map(|c| c.first().map(|f| f.len())).unwrap_or(1).max(1) as f64;
+    let cells = d.iter().find_map(|c| c.iter().map(Vec::len).find(|&l| l > 0)).unwrap_or(1).max(1) as f64;
     let b: Vec<Vec<Vec<u64>>> = d.iter().map(|c| bits(c)).collect();
     let counts: Vec<Vec<u32>> = b.iter().map(|c| c.iter().map(|f| f.iter().map(|w| w.count_ones()).sum()).collect()).collect();
     // best[a][r] = (shift of a against r, how clearly it peaks)
@@ -252,7 +252,7 @@ fn first_offsets(d: &[Vec<Vec<bool>>], search: usize) -> Vec<i64> {
 
 pub fn align(lo: &[Vec<Vec<i16>>], search: usize) -> Alignment {
     let d: Vec<Vec<Vec<bool>>> = lo.iter().map(|c| changes(c)).collect();
-    let cells = d.iter().find_map(|c| c.first().map(|f| f.len())).unwrap_or(0);
+    let cells = d.iter().find_map(|c| c.iter().map(Vec::len).find(|&l| l > 0)).unwrap_or(0);
     let n = d.len();
     let mut off = first_offsets(&d, search);
     for _round in 0..8 {
@@ -368,8 +368,13 @@ pub fn align(lo: &[Vec<Vec<i16>>], search: usize) -> Alignment {
         }
     }
     // Above the usual share, less what rose everywhere at once (cuts).
+    // Only where most recordings are there: one recording's own motion at
+    // the edges of the aligned time would look like everyone's.
     let activity = (0..len)
         .map(|t| {
+            if count[t] * 2 < n {
+                return 0.0;
+            }
             let mut e: Vec<f32> = share[t].iter().zip(&usual).map(|(s, u)| s - u).collect();
             let m = e.len() / 2;
             let all = if e.is_empty() { 0.0 } else { *e.clone().select_nth_unstable_by(m, |a, b| a.total_cmp(b)).1 };
@@ -786,8 +791,26 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
         .iter()
         .map(|p| source::probe(p).map(|info| Input { path: p.clone(), info }).map_err(|e| format!("{}: {e}", p.display())))
         .collect::<Result<_, _>>()?;
+    // Frames are lined up by number and the box by position, so every
+    // recording must have the same picture size and frame rate.
+    let first = &inputs[0].info;
+    if let Some(odd) = inputs.iter().find(|i| {
+        (i.info.width, i.info.height) != (first.width, first.height) || (i.info.frame_rate - first.frame_rate).abs() > 0.01
+    }) {
+        return Err(format!(
+            "{}: 画面の大きさかフレームレートがほかの録画と違います（{}x{} {:.3}fps、最初の録画は {}x{} {:.3}fps）。同じ形式の録画だけで解析してください",
+            odd.path.display(),
+            odd.info.width,
+            odd.info.height,
+            odd.info.frame_rate,
+            first.width,
+            first.height,
+            first.frame_rate
+        ));
+    }
     let (w, h) = (r.w as usize, r.h as usize);
     let opt = job.read_options();
+    opt.check()?;
     let total = inputs.len();
     let done = AtomicUsize::new(0);
     let tick = |stage: Stage| {
@@ -807,6 +830,9 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
             v.push(cells(&f.y, w, h));
             true
         })?;
+        if v.len() < 8 {
+            return Err(format!("{}: 指定した範囲からフレームをほとんど読めませんでした", input.path.display()));
+        }
         tick(Stage::Align);
         Ok(v)
     })?;
@@ -828,7 +854,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
     // 2. Where the still logo is: edges that stay put after the animation.
     begin(Stage::Locate);
     let presence = for_inputs(&inputs, job.threads, cancel, &|c, input| {
-        let mut count = vec![0u16; w * h];
+        let mut count = vec![0u32; w * h];
         let mut frames = 0u32;
         let mut luma = vec![0u8; w * h];
         read_all(input, r, &opt, |f, fr| {
@@ -849,7 +875,7 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
     let mut frames = 0u32;
     for (c, f) in &presence {
         for (a, b) in count.iter_mut().zip(c) {
-            *a += *b as u32;
+            *a += *b;
         }
         frames += f;
     }
@@ -884,23 +910,34 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
         max_frames: 8000,
         robust_passes: 3,
     };
-    let scanner = Mutex::new(Scanner::new(still_rect.w as usize, still_rect.h as usize, params));
+    // The recordings are handed over in order, whichever is read first:
+    // past `max_frames` the scanner keeps a random subset, and the same
+    // input must give the same logo.
+    let scanner = Mutex::new((Scanner::new(still_rect.w as usize, still_rect.h as usize, params), 0usize));
+    let turn = std::sync::Condvar::new();
     for_inputs(&inputs, job.threads, cancel, &|c, input| {
         let mut mine = Vec::new();
-        read_all(input, r, &opt, |f, fr| {
+        let read = read_all(input, r, &opt, |f, fr| {
             if f as i64 - off[c] >= still_from {
                 mine.push(crop(&fr, w, still_rect));
             }
             true
-        })?;
-        let mut s = scanner.lock().unwrap();
-        for fr in mine {
-            s.push(fr);
+        });
+        let mut s = turn.wait_while(scanner.lock().unwrap(), |s| s.1 != c).unwrap();
+        // Passed on even after an error, so the others do not wait for ever.
+        s.1 += 1;
+        if read.is_ok() {
+            for fr in mine {
+                s.0.push(fr);
+            }
         }
+        drop(s);
+        turn.notify_all();
+        read?;
         tick(Stage::Still);
         Ok(())
     })?;
-    let report = scanner.into_inner().unwrap().finish(job.threads);
+    let report = scanner.into_inner().unwrap().0.finish(job.threads);
     if report.frames_used < 2 {
         return Err("動きが止まったあとのロゴを求められません（ロゴのまわりの背景が、どの録画でも模様や動きのある絵でした）。録画を増やしてください".into());
     }
@@ -1107,7 +1144,17 @@ pub fn run(job: &AnimJob, progress: &(dyn Fn(&AnimProgress) + Sync), cancel: &At
                 .collect();
         } else if pass == 2 {
             for (slot, res) in slots.iter_mut().zip(results) {
-                slot.gate = slot.cands.iter().zip(&res.votes).map(|(c, v)| c[(0..CANDIDATES).max_by_key(|i| (v[*i], CANDIDATES - i)).unwrap()]).collect();
+                // A pixel no sample voted for keeps a line that can be compared
+                // with (the fit of this frame may have been none).
+                slot.gate = slot
+                    .cands
+                    .iter()
+                    .zip(&res.votes)
+                    .map(|(c, v)| {
+                        let pick = c[(0..CANDIDATES).max_by_key(|i| (v[*i], CANDIDATES - i)).unwrap()];
+                        if pick.0.is_nan() { c.iter().copied().find(|l| !l.0.is_nan()).unwrap_or((1.0, 0.0)) } else { pick }
+                    })
+                    .collect();
                 slot.cands = Vec::new();
             }
         } else {
@@ -1387,6 +1434,9 @@ fn depth(logo: &lgd::Logo, y: &[i16], band: &[(usize, usize)]) -> f32 {
     best.1 as f32
 }
 
+/// The longest fade looked for, in frames: stations fade over a second or so.
+const FADEOUT_MAX: i64 = 300;
+
 /// delogomod's fade: full depth up to `end - fadeout`, then down step by
 /// step to nothing after `end`.
 fn fade_at(u: i64, end: i64, fadeout: i64) -> f64 {
@@ -1427,10 +1477,22 @@ fn fit_fade(depths: &[Vec<(i64, f32)>], rest: i64) -> Option<Hold> {
         return None;
     }
     let (u0, u1) = (series[0].0, series[series.len() - 1].0);
+    // Running sums of the misfit while the logo is full and once it is
+    // gone, so only the fade itself is summed for each candidate: a long
+    // recording after the animation would otherwise take hours.
+    let (mut full, mut gone) = (vec![0.0f64], vec![0.0f64]);
+    for &(_, m) in &series {
+        full.push(full.last().unwrap() + (m - 1.0).powi(2));
+        gone.push(gone.last().unwrap() + m * m);
+    }
+    let first_after = |u: i64| series.partition_point(|&(v, _)| v <= u);
     let mut best = (f64::MAX, Hold { end: u1, fadeout: 1 });
     for end in rest.max(u0)..=u1 {
-        for fadeout in 1..=(end - rest).max(1) {
-            let sse: f64 = series.iter().map(|&(u, m)| (m - fade_at(u, end, fadeout)).powi(2)).sum();
+        let b = first_after(end);
+        for fadeout in 1..=(end - rest).clamp(1, FADEOUT_MAX) {
+            let a = first_after(end - fadeout);
+            let fade: f64 = series[a..b].iter().map(|&(u, m)| (m - fade_at(u, end, fadeout)).powi(2)).sum();
+            let sse = full[a] + fade + (gone[series.len()] - gone[b]);
             if sse < best.0 {
                 best = (sse, Hold { end, fadeout });
             }

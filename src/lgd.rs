@@ -138,8 +138,13 @@ pub fn read(mut r: impl Read) -> io::Result<Vec<Logo>> {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad logo size"));
         }
         let n = w as usize * h as usize;
-        let mut raw = vec![0u8; n * 12];
-        r.read_exact(&mut raw)?;
+        // Read as far as the file goes rather than allocated up front: a
+        // broken header can claim gigabytes.
+        let mut raw = Vec::new();
+        (&mut r).take(n as u64 * 12).read_to_end(&mut raw)?;
+        if raw.len() != n * 12 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the logo data is cut short"));
+        }
         let pixels = raw
             .as_chunks::<12>()
             .0

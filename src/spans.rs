@@ -153,6 +153,7 @@ pub fn measure(
     progress: &dyn Fn(f64),
     cancel: &AtomicBool,
 ) -> Result<(Vec<f32>, u64), String> {
+    opt.check()?;
     let meter = Meter::new(logo)?;
     if logo.x < 0 || logo.y < 0 {
         return Err("ロゴの位置が画面の外にあります".into());
@@ -160,8 +161,9 @@ pub fn measure(
     let rect = Rect { x: logo.x as u32, y: logo.y as u32, w: logo.w as u32, h: logo.h as u32 };
     let offset = match opt.start {
         None => 0,
-        Some(s) if opt.on_the_clock => source::clock_frame(info, source::first_picture(path).map_err(|e| e.to_string())?, s),
-        Some(s) => (s * info.frame_rate).round() as u64,
+        // Counted from the first picture that decodes, as AviSynth does
+        // (by pictures this is only as near as the clock gets).
+        Some(s) => source::clock_frame(info, source::first_picture(path).map_err(|e| e.to_string())?, s),
     };
     let mut reader = Reader::open(path, info, rect, opt).map_err(|e| e.to_string())?;
     let threads = (opt.threads as usize).max(1);
@@ -302,12 +304,17 @@ pub fn find(depths: &[f32], frame_rate: f64) -> Vec<Span> {
     for (k, &(a, b)) in runs.iter().enumerate() {
         let level = median(&depths[a..b]).unwrap_or(1.0).max(0.5) as f64;
         let scaled = |r: std::ops::Range<usize>| depths[r].iter().map(|&v| v as f64 / level).collect::<Vec<f64>>();
+        // A fade the pictures cannot see at all (white behind a white
+        // logo) fits any start equally: none is fitted, and the stretch
+        // starts or ends where it was seen.
+        let seen = |d: &[f64]| d.iter().any(|v| !v.is_nan());
         // The fade in: between the stretch before and the middle of this one.
         ins.push((a > 0).then(|| {
             let floor = if k == 0 { 0 } else { runs[k - 1].1 };
             let lo = a.saturating_sub(reach).max(floor);
             let hi = (a + reach).min((a + b) / 2);
-            fit_in(&scaled(lo..hi), lo as i64, reach as i64)
+            let d = scaled(lo..hi);
+            seen(&d).then(|| fit_in(&d, lo as i64, reach as i64))
         }));
         // The fade out: the same, read backwards from the end.
         outs.push((b < n).then(|| {
@@ -316,18 +323,40 @@ pub fn find(depths: &[f32], frame_rate: f64) -> Vec<Span> {
             let hi = (b + reach).min(ceil);
             let mut d = scaled(lo..hi);
             d.reverse();
-            fit_in(&d, 0, reach as i64).into_iter().map(|(e, s)| (e, hi as i64 - 1 - s)).collect()
+            seen(&d).then(|| fit_in(&d, 0, reach as i64).into_iter().map(|(e, s)| (e, hi as i64 - 1 - s)).collect::<Vec<_>>())
         }));
     }
-    let fadein = common_length(&ins.iter().flatten().cloned().collect::<Vec<_>>());
-    let fadeout = common_length(&outs.iter().flatten().cloned().collect::<Vec<_>>());
-    let mut spans = Vec::new();
-    for (k, _) in runs.iter().enumerate() {
-        let (start, fi) = ins[k].as_ref().map_or((0, 0), |f| (f[fadein].1 as u64, fadein as u64));
-        let (end, fo) = outs[k].as_ref().map_or((n as u64 - 1, 0), |f| (f[fadeout].1 as u64, fadeout as u64));
-        if end > start {
-            spans.push(Span { start, end, fadein: fi, fadeout: fo });
+    let fadein = common_length(&ins.iter().flatten().flatten().cloned().collect::<Vec<_>>());
+    let fadeout = common_length(&outs.iter().flatten().flatten().cloned().collect::<Vec<_>>());
+    let mut spans: Vec<Span> = Vec::new();
+    for (k, &(a, b)) in runs.iter().enumerate() {
+        let (start, fi) = match &ins[k] {
+            None => (0, 0),
+            Some(None) => (a as u64, 0),
+            Some(Some(f)) => (f[fadein].1 as u64, fadein as u64),
+        };
+        let (end, fo) = match &outs[k] {
+            None => (n as u64 - 1, 0),
+            Some(None) => (b as u64 - 1, 0),
+            Some(Some(f)) => (f[fadeout].1 as u64, fadeout as u64),
+        };
+        if end <= start {
+            continue;
         }
+        let mut span = Span { start, end, fadein: fi, fadeout: fo };
+        // Fades fitted from both sides of a short gap can cross: the frames
+        // between are split, so none is erased twice.
+        if let Some(last) = spans.last_mut() {
+            if last.end >= span.start {
+                let mid = (last.end + span.start) / 2;
+                last.end = mid.max(last.start);
+                span.start = (mid + 1).max(last.end + 1);
+                if span.end <= span.start {
+                    continue;
+                }
+            }
+        }
+        spans.push(span);
     }
     spans
 }

@@ -172,8 +172,10 @@ fn cmd_scan(args: &[String]) -> Res {
             }
         },
         &AtomicBool::new(false),
-    )?;
+    );
+    // End the progress line before anything else, an error included.
     eprintln!();
+    let out = out?;
     if out.peak < 50 {
         eprintln!(
             "warning: no logo found (largest dp_y {}); the usable frames may all lack the logo or show it on its own colour",
@@ -222,6 +224,16 @@ fn cmd_anim(args: &[String]) -> Res {
         }
     }
     let rect = rect.ok_or("--rect is required (the area the whole animation plays in)")?;
+    // Checked before the long analysis rather than after it.
+    let sample = lgdscan::avs::path_for(&output);
+    if sample == output {
+        return Err("the output must not be a .avs file (the sample script is written there)".into());
+    }
+    let still_name = match &still {
+        Some(p) => lgd::encode_name(&p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default())
+            .map_err(|bad| format!("the --still file name has characters CP932 cannot hold: {bad}"))?,
+        None => Vec::new(),
+    };
     let mut job = AnimJob::new(inputs.clone(), rect);
     job.start = start;
     job.end = end;
@@ -276,13 +288,15 @@ fn cmd_anim(args: &[String]) -> Res {
     lgd::write(&mut f, &logos)?;
     f.flush()?;
     eprintln!("wrote {}", output.display());
-    let sample = lgdscan::avs::path_for(&output);
     let ldp_name = output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    lgdscan::avs::write(&sample, &lgdscan::avs::moving(&ldp_name, logos.len(), out.hold))?;
-    eprintln!("wrote {} (a sample script for delogomod)", sample.display());
+    // Only a sample: the logo data is written whether or not it can be.
+    match lgdscan::avs::write(&sample, &lgdscan::avs::moving(&ldp_name, logos.len(), out.hold)) {
+        Ok(()) => eprintln!("wrote {} (a sample script for delogomod)", sample.display()),
+        Err(e) => eprintln!("warning: no sample script: {e}"),
+    }
     if let Some(path) = still {
         let mut logo = out.still.clone();
-        logo.name = lgd::encode_name(&path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
+        logo.name = still_name;
         let mut f = BufWriter::new(File::create(&path)?);
         lgd::write(&mut f, &[logo])?;
         f.flush()?;
@@ -321,6 +335,9 @@ fn cmd_avs(args: &[String]) -> Res {
         lgdscan::avs::still(&name, None)
     };
     let output = output.unwrap_or_else(|| lgdscan::avs::path_for(&logo));
+    if output == logo {
+        return Err("the script would overwrite the logo file".into());
+    }
     lgdscan::avs::write(&output, &text)?;
     eprintln!("wrote {}", output.display());
     Ok(())
@@ -353,7 +370,11 @@ fn cmd_spans(args: &[String]) -> Res {
     let duration = end.map(|e| e - start.unwrap_or(0.0));
     let opt = ReadOptions { start, duration, step: 1, threads, scan, on_the_clock: !pictures };
     let t0 = Instant::now();
-    let (depths, offset) = lgdscan::spans::measure(input, &info, &logo, &opt, &|f| eprint!("\r  {:3.0}%", f * 100.0), &AtomicBool::new(false))?;
+    let measured = lgdscan::spans::measure(input, &info, &logo, &opt, &|f| eprint!("\r  {:3.0}%", f * 100.0), &AtomicBool::new(false));
+    if measured.is_err() {
+        eprintln!();
+    }
+    let (depths, offset) = measured?;
     eprintln!("\r{} frames in {:.1}s", depths.len(), t0.elapsed().as_secs_f64());
     if let Some(p) = depths_out {
         let mut w = BufWriter::new(File::create(&p)?);
@@ -429,7 +450,11 @@ fn cmd_detect(args: &[String]) -> Res {
         &DetectOptions { samples, start, end, threads },
         &|f| eprint!("\r  {:3.0}%", f * 100.0),
         &AtomicBool::new(false),
-    )?;
+    );
+    if d.is_err() {
+        eprintln!();
+    }
+    let d = d?;
     eprintln!("\r{} keyframes in {:.1}s", d.frames, t0.elapsed().as_secs_f64());
     for c in d.candidates(share, margin) {
         let r = c.rect;
@@ -504,17 +529,22 @@ fn cmd_render(path: &Path, out: &Path) -> Res {
     let max = l.pixels.iter().map(|p| p.dp_y).max().unwrap_or(1).max(1) as f64;
     let bytes: Vec<u8> = l.pixels.iter().map(|p| (p.dp_y.max(0) as f64 / max * 255.0).round() as u8).collect();
     f.write_all(&bytes)?;
+    f.flush()?;
     Ok(())
 }
 
 fn cmd_erase(lgd_path: &Path, video: &Path, at: &str, out: &Path) -> Res {
     let l = load(lgd_path)?.into_iter().next().ok_or("empty file")?;
     let info = source::probe(video)?;
-    let m = 16u32;
-    let (x0, y0) = ((l.x as u32).saturating_sub(m), (l.y as u32).saturating_sub(m));
-    let x1 = (l.x as u32 + l.w as u32 + m).min(info.width);
-    let y1 = (l.y as u32 + l.h as u32 + m).min(info.height);
-    let rect = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    let m = 16i64;
+    let (lx, ly, lw, lh) = (l.x as i64, l.y as i64, l.w as i64, l.h as i64);
+    if lx < 0 || ly < 0 || lx + lw > info.width as i64 || ly + lh > info.height as i64 {
+        return Err(format!("the logo ({}x{}+{}+{}) does not fit in the {}x{} picture", lw, lh, lx, ly, info.width, info.height).into());
+    }
+    let (x0, y0) = ((lx - m).max(0), (ly - m).max(0));
+    let x1 = (lx + lw + m).min(info.width as i64);
+    let y1 = (ly + lh + m).min(info.height as i64);
+    let rect = Rect { x: x0 as u32, y: y0 as u32, w: (x1 - x0) as u32, h: (y1 - y0) as u32 };
     let opt = ReadOptions { start: Some(at.parse()?), duration: None, step: 1, threads: 4, scan: Scan::Auto, on_the_clock: false };
     let frame = Reader::open(video, &info, rect, &opt)?.next_frame()?.ok_or("no frame at that time")?;
     let (w, h) = (rect.w as usize, rect.h as usize);

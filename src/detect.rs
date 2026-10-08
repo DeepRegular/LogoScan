@@ -54,18 +54,18 @@ pub fn measure(
     let t0 = opt.start.unwrap_or(0.0).max(0.0);
     let t1 = opt.end.unwrap_or(info.duration).min(if info.duration > 0.0 { info.duration } else { f64::MAX });
     if t1.partial_cmp(&t0) != Some(std::cmp::Ordering::Greater) {
-        return Err("録画の長さがわかりません".into());
+        return Err(if opt.end.is_none() && info.duration <= 0.0 { "録画の長さがわかりません" } else { "読む範囲が録画の中にありません" }.into());
     }
     let n = opt.samples.max(4) as usize;
     let times: Vec<f64> = (0..n).map(|i| t0 + (t1 - t0) * (i as f64 + 0.5) / n as f64).collect();
-    let counts = Mutex::new(vec![0u16; w * h]);
+    let counts = Mutex::new(vec![0u32; w * h]);
     let frames = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let next = AtomicUsize::new(0);
     std::thread::scope(|s| {
         for _ in 0..opt.threads.clamp(1, 6) {
             s.spawn(|| {
-                let mut local = vec![0u16; w * h];
+                let mut local = vec![0u32; w * h];
                 let mut got = 0;
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
@@ -113,7 +113,7 @@ fn grab_key_luma(path: &Path, w: usize, h: usize, at: f64) -> Option<Vec<u8>> {
     (out.stdout.len() >= w * h).then(|| out.stdout[..w * h].to_vec())
 }
 
-pub(crate) fn edges(luma: &[u8], w: usize, h: usize, count: &mut [u16]) {
+pub(crate) fn edges(luma: &[u8], w: usize, h: usize, count: &mut [u32]) {
     let p = |x: usize, y: usize| luma[y * w + x] as i32;
     for y in 1..h - 1 {
         for x in 1..w - 1 {

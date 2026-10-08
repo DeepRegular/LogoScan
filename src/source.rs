@@ -7,9 +7,11 @@
 //! mean of their neighbours (AviUtl's YUY2 -> YC48), vertically 4:2:0 is
 //! interpolated within each field for interlaced material.
 
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 /// A command for `ffmpeg` or `ffprobe`: a copy next to our own executable or
 /// in an `ffmpeg` folder beside it (as the Windows package ships it), else
@@ -172,6 +174,7 @@ pub fn grab_rgb(path: &Path, info: &VideoInfo, at: f64) -> io::Result<Vec<u8>> {
     let out = tool("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
         .args(input)
+        .arg("-noautorotate")
         .arg("-i")
         .arg(path)
         .args(["-map", "0:v:0", "-frames:v", "1", "-an", "-sn", "-dn", "-fps_mode", "passthrough"])
@@ -198,7 +201,7 @@ pub fn grab_rgb_frame(path: &Path, info: &VideoInfo, start: Option<f64>, n: u64)
     let mut cmd = tool("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
     cmd.args(input);
-    cmd.arg("-i").arg(path);
+    cmd.arg("-noautorotate").arg("-i").arg(path);
     let mut vf = format!("select='eq(n\\,{n})',scale=in_color_matrix={matrix}:in_range=tv:out_range=pc:flags=bilinear,format=rgb24");
     if let Some(p) = pick {
         vf = format!("{p},{vf}");
@@ -245,9 +248,26 @@ pub struct ReadOptions {
     pub on_the_clock: bool,
 }
 
+impl ReadOptions {
+    /// A range that can be read: from no earlier than the beginning, and
+    /// ending after it starts.
+    pub fn check(&self) -> Result<(), String> {
+        if self.start.is_some_and(|s| !(s.is_finite() && s >= 0.0)) {
+            return Err("範囲の始まりは 0 秒以降にしてください".into());
+        }
+        if self.duration.is_some_and(|d| !(d.is_finite() && d > 0.0)) {
+            return Err("範囲の終わりは始まりより後にしてください".into());
+        }
+        Ok(())
+    }
+}
+
 pub struct Reader {
     child: Child,
     stdout: BufReader<ChildStdout>,
+    /// ffmpeg's last messages, and the thread that reads them.
+    errors: Arc<Mutex<Vec<String>>>,
+    drain: Option<JoinHandle<()>>,
     rect: Rect,
     /// The area ffmpeg hands over: the rectangle plus a margin for the
     /// chroma interpolation, aligned so chroma rows keep their parity.
@@ -265,7 +285,8 @@ pub struct Reader {
 
 impl Reader {
     pub fn open(path: &Path, info: &VideoInfo, rect: Rect, opt: &ReadOptions) -> io::Result<Reader> {
-        if rect.w == 0 || rect.h == 0 || rect.x + rect.w > info.width || rect.y + rect.h > info.height {
+        let (right, bottom) = (rect.x as u64 + rect.w as u64, rect.y as u64 + rect.h as u64);
+        if rect.w == 0 || rect.h == 0 || right > info.width as u64 || bottom > info.height as u64 {
             return Err(io::Error::other(format!(
                 "rectangle {}x{}+{}+{} lies outside the {}x{} picture",
                 rect.w, rect.h, rect.x, rect.y, info.width, info.height
@@ -279,7 +300,10 @@ impl Reader {
         } else {
             (0, 0)
         };
-        let high = pf.contains("10") || pf.contains("12") || pf.contains("16") || pf.starts_with("p0");
+        // More than 8 bits: yuv420p10le and the like, or p010/p210/p410
+        // (not nv12, whose 12 is not a depth).
+        let high = ["p9", "p10", "p12", "p14", "p16"].iter().any(|d| pf.contains(d))
+            || ["p0", "p2", "p4"].iter().any(|d| pf.starts_with(d));
         let out_fmt = match (sx, sy, high) {
             (1, 1, false) => "yuv420p",
             (1, 0, false) => "yuv422p",
@@ -329,23 +353,60 @@ impl Reader {
         cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
         cmd.args(["-threads", &opt.threads.to_string()]);
         cmd.args(input);
-        cmd.arg("-i").arg(path);
+        cmd.arg("-noautorotate").arg("-i").arg(path);
         cmd.args(output);
         cmd.args(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", &vf, "-fps_mode", "passthrough"]);
         cmd.args(["-f", "rawvideo", "pipe:1"]);
-        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| io::Error::other(format!("cannot run ffmpeg: {e}")))?;
         let stdout = BufReader::with_capacity(1 << 20, child.stdout.take().unwrap());
+        // ffmpeg's messages still reach our stderr as before; the last few
+        // are kept to explain a failure (the window has no console).
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let stderr = child.stderr.take().unwrap();
+        let keep = Arc::clone(&errors);
+        let drain = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                eprintln!("{line}");
+                let mut k = keep.lock().unwrap();
+                if k.len() == 8 {
+                    k.remove(0);
+                }
+                k.push(line);
+            }
+        });
         let (cw, ch) = (aw.div_ceil(1 << sx), ah.div_ceil(1 << sy));
         let bytes = (aw * ah + 2 * cw * ch) as usize * if wide { 2 } else { 1 };
-        Ok(Reader { child, stdout, rect, area, sx, sy, wide, unit, interlaced, buf: vec![0; bytes] })
+        Ok(Reader { child, stdout, errors, drain: Some(drain), rect, area, sx, sy, wide, unit, interlaced, buf: vec![0; bytes] })
+    }
+
+    /// At the end of the output: an error if ffmpeg failed or stopped in
+    /// the middle of a frame, with what it said.
+    fn finish(&mut self, partial: bool) -> io::Result<()> {
+        let status = self.child.wait()?;
+        if let Some(d) = self.drain.take() {
+            let _ = d.join();
+        }
+        if status.success() && !partial {
+            return Ok(());
+        }
+        let said = self.errors.lock().unwrap().join("\n");
+        let what = if status.success() { "ffmpeg stopped in the middle of a frame".to_string() } else { format!("ffmpeg failed ({status})") };
+        Err(io::Error::other(if said.is_empty() { what } else { format!("{what}: {said}") }))
     }
 
     pub fn next_frame(&mut self) -> io::Result<Option<Frame>> {
-        match self.stdout.read_exact(&mut self.buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e),
+        let mut got = 0;
+        while got < self.buf.len() {
+            match self.stdout.read(&mut self.buf[got..]) {
+                Ok(0) => {
+                    self.finish(got > 0)?;
+                    return Ok(None);
+                }
+                Ok(n) => got += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
         }
         let (aw, ah) = (self.area.w as usize, self.area.h as usize);
         let (cw, ch) = (aw.div_ceil(1 << self.sx), ah.div_ceil(1 << self.sy));
@@ -385,7 +446,10 @@ impl Reader {
                     let k0 = pos.floor().max(0.0);
                     let t = (pos - k0).clamp(0.0, 1.0);
                     let k0 = k0 as usize;
-                    (2 * k0 + f, 2 * (k0 + 1) + f, t)
+                    // At the bottom of the picture, the last row of the
+                    // same field rather than one of the other.
+                    let last = if ch > f { ch - 1 - ((ch - 1 + f) & 1) } else { ch - 1 };
+                    ((2 * k0 + f).min(last), (2 * (k0 + 1) + f).min(last), t)
                 } else {
                     // MPEG-2 progressive: chroma between luma rows 2k, 2k+1.
                     let pos = (ly as f64 - 0.5) / 2.0;
