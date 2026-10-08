@@ -61,6 +61,7 @@ impl AnimJob {
             step: 1,
             threads: 4,
             scan: self.scan,
+            on_the_clock: false,
         }
     }
 }

@@ -125,6 +125,37 @@ fn window_args(info: &VideoInfo, start: Option<f64>, duration: Option<f64>) -> (
     }
 }
 
+/// The time in the file of the first picture that decodes: frame 0, as
+/// AviSynth counts (the pictures before it at the start of a recording
+/// refer to ones that are not there).
+pub fn first_picture(path: &Path) -> io::Result<f64> {
+    let out = tool("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#60", "-show_entries", "frame=pts_time", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .map_err(|e| io::Error::other(format!("cannot run ffprobe: {e}")))?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.trim().trim_end_matches(',').parse().ok())
+        .ok_or_else(|| io::Error::other(format!("no picture decodes at the start of {}", path.display())))
+}
+
+/// The frame at `at` seconds (counted from the container's start, as all
+/// times here are), numbered by the clock from the picture at `first`.
+pub fn clock_frame(info: &VideoInfo, first: f64, at: f64) -> u64 {
+    ((info.start_time + at - first) * info.frame_rate).round().max(0.0) as u64
+}
+
+/// A frame rate as ffmpeg takes it: the NTSC rates as fractions.
+fn rate_text(fps: f64) -> String {
+    for (n, d) in [(24000, 1001), (30000, 1001), (60000, 1001)] {
+        if (fps - n as f64 / d as f64).abs() < 1e-3 {
+            return format!("{n}/{d}");
+        }
+    }
+    format!("{fps:.6}")
+}
+
 /// The matrix AviUtl would pick for this picture: BT.709 from 720 lines up.
 pub fn is_hd(info: &VideoInfo) -> bool {
     info.height >= 720
@@ -208,6 +239,10 @@ pub struct ReadOptions {
     pub step: u32,
     pub threads: u32,
     pub scan: Scan,
+    /// One frame per frame of time rather than per picture: a picture
+    /// that repeats a field (shown for a frame and a half) is sometimes
+    /// handed over twice, so frame numbers follow the clock.
+    pub on_the_clock: bool,
 }
 
 pub struct Reader {
@@ -269,6 +304,20 @@ impl Reader {
         let ah = ((ab - ay + 3) & !3).min(info.height - ay);
         let area = Rect { x: ax, y: ay, w: aw, h: ah };
         let mut vf = format!("crop={aw}:{ah}:{ax}:{ay}:exact=1,format={out_fmt}");
+        if opt.on_the_clock && info.frame_rate > 0.0 {
+            // A grid of frames from the first picture that decodes: the
+            // first one read, or, with a start, laid from that picture's
+            // time in the file's own clock (-copyts).
+            let rate = rate_text(info.frame_rate);
+            vf = match opt.start {
+                None => format!("{vf},fps=fps={rate}"),
+                Some(s) => {
+                    let first = first_picture(path)?;
+                    let origin = first + clock_frame(info, first, s) as f64 / info.frame_rate;
+                    format!("{vf},fps=fps={rate}:start_time={origin:.6}")
+                }
+            };
+        }
         if opt.step > 1 {
             vf = format!("select='not(mod(n\\,{}))',{vf}", opt.step);
         }

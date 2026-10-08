@@ -14,11 +14,15 @@ use lgdscan::job::{self, Job, Outcome};
 use lgdscan::lgd::{self, Logo};
 use lgdscan::scan::Background;
 use lgdscan::source::{self, ReadOptions, Reader, Rect, Scan, VideoInfo};
+use lgdscan::spans::{self, Span};
 
 fn main() -> eframe::Result {
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 860.0]).with_title("lgdscan — ロゴ解析"),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1400.0, 860.0])
+            .with_title("lgdscan — ロゴ解析")
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon-256.png")).unwrap_or_default()),
         ..Default::default()
     };
     eframe::run_native(
@@ -202,6 +206,10 @@ struct App {
     logo: Option<Logo>,
     logo_tex: Option<TextureHandle>,
     outcome: Option<Outcome>,
+    /// Where the station logo is on screen in the first input, and the
+    /// frame the stretches count from.
+    spans_task: Option<Task<(PathBuf, Vec<Span>, u64)>>,
+    spans: Option<(PathBuf, Vec<Span>, u64)>,
     show_erased: bool,
     name: String,
 
@@ -252,6 +260,8 @@ impl Default for App {
             logo: None,
             logo_tex: None,
             outcome: None,
+            spans_task: None,
+            spans: None,
             show_erased: false,
             name: String::new(),
             mode: Mode::Still,
@@ -350,19 +360,13 @@ impl App {
     }
 
     fn set_logo(&mut self, ctx: &egui::Context, logo: Logo, outcome: Option<Outcome>) {
-        let max = logo.pixels.iter().map(|p| p.dp_y).max().unwrap_or(1).max(1) as f32;
-        let rgb: Vec<u8> = logo
-            .pixels
-            .iter()
-            .flat_map(|p| {
-                let v = (p.dp_y.max(0) as f32 / max * 255.0) as u8;
-                [v, v, v]
-            })
-            .collect();
+        let hd = self.info.as_ref().is_none_or(source::is_hd);
+        let rgb = erase::logo_to_rgb(&logo, hd);
         let img = egui::ColorImage::from_rgb([logo.w as usize, logo.h as usize], &rgb);
         self.logo_tex = Some(ctx.load_texture("logo", img, TextureOptions::NEAREST));
         self.logo = Some(logo);
         self.outcome = outcome;
+        self.spans = None;
         self.erased_rgb = None;
         self.frame_tex = None;
         if self.show_erased {
@@ -427,6 +431,17 @@ impl App {
                 Ok(d) => {
                     self.detection = Some(d);
                     self.refresh_candidates(true);
+                }
+                Err(e) => self.status = e,
+            }
+        }
+        if let Some(r) = self.spans_task.as_ref().and_then(|t| t.poll()) {
+            self.spans_task = None;
+            match r {
+                Ok(found) if found.1.is_empty() => self.status = "ロゴの出ている区間が見つかりませんでした".into(),
+                Ok(found) => {
+                    self.status = format!("ロゴの出ている区間が {} か所見つかりました", found.1.len());
+                    self.spans = Some(found);
                 }
                 Err(e) => self.status = e,
             }
@@ -576,7 +591,15 @@ impl App {
             Scan::Interlaced => true,
         };
         let lgd = if self.name.is_empty() { "logo.lgd".to_string() } else { format!("{}.lgd", self.name) };
+        if let Some((_, spans, offset)) = self.found_spans() {
+            return Some(spans::erase_call(&lgd, spans, *offset, interlaced));
+        }
         Some(format!("EraseLOGO(logofile=\"{lgd}\", start={start}, end={end}, interlaced={interlaced})"))
+    }
+
+    /// The stretches found, while they still belong to the first input.
+    fn found_spans(&self) -> Option<&(PathBuf, Vec<Span>, u64)> {
+        self.spans.as_ref().filter(|(p, _, _)| self.inputs.first() == Some(p))
     }
 
     /// The message for a saved .lgd, after writing its sample script.
@@ -587,7 +610,13 @@ impl App {
         }
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let sample = lgdscan::avs::path_for(path);
-        match lgdscan::avs::write(&sample, &lgdscan::avs::still(&name)) {
+        let interlaced = match self.scan {
+            Scan::Auto => self.info.as_ref().is_some_and(|i| i.interlaced),
+            Scan::Progressive => false,
+            Scan::Interlaced => true,
+        };
+        let measured = self.found_spans().map(|(_, s, offset)| spans::erase_call(&name, s, *offset, interlaced));
+        match lgdscan::avs::write(&sample, &lgdscan::avs::still(&name, measured.as_deref())) {
             Ok(()) => format!("{msg}。サンプルを {} に書きました", sample.display()),
             Err(e) => format!("{msg}。サンプルは書けません: {e}"),
         }
@@ -645,15 +674,7 @@ impl App {
         let k = a.k.min(n.saturating_sub(1));
         let logo = &a.logos[k];
         if a.tex.as_ref().is_none_or(|(t, _)| *t != k) {
-            let max = logo.pixels.iter().map(|p| p.dp_y).max().unwrap_or(1).max(1) as f32;
-            let rgb: Vec<u8> = logo
-                .pixels
-                .iter()
-                .flat_map(|p| {
-                    let v = (p.dp_y.max(0) as f32 / max * 255.0) as u8;
-                    [v, v, v]
-                })
-                .collect();
+            let rgb = erase::logo_to_rgb(logo, true);
             let img = egui::ColorImage::from_rgb([logo.w as usize, logo.h as usize], &rgb);
             a.tex = Some((k, ctx.load_texture("anim", img, TextureOptions::NEAREST)));
         }
@@ -784,6 +805,20 @@ impl App {
                 },
                 cancel,
             )
+        }));
+    }
+
+    /// Reads the first input again for where the station logo is on
+    /// screen and how it fades.
+    fn start_spans(&mut self, ctx: &egui::Context) {
+        let (Some(path), Some(info), Some(logo)) = (self.inputs.first().cloned(), self.info.clone(), self.logo.clone()) else { return };
+        let (start, duration) = if self.range_on { (Some(self.range.0), Some(self.range.1 - self.range.0)) } else { (None, None) };
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+        let opt = ReadOptions { start, duration, step: 1, threads, scan: self.scan, on_the_clock: true };
+        self.spans_task = Some(Task::spawn(ctx, move |cancel, report| {
+            let (depths, offset) =
+                spans::measure(&path, &info, &logo, &opt, &|f| report(f as f32, "ロゴの出ている区間を探しています…".into()), cancel)?;
+            Ok((path, spans::find(&depths, info.frame_rate), offset))
         }));
     }
 
@@ -1098,12 +1133,48 @@ impl App {
                     ui.checkbox(&mut self.write_sample, "サンプルの .avs も書く")
                         .on_hover_text("delogo での使い方を、.lgd と同じ名前の .avs に書きます");
                 });
+                if let Some((_, spans, _)) = self.found_spans() {
+                    let fade = |what: &str, v: Vec<u64>| match (v.iter().min(), v.iter().max()) {
+                        (Some(a), Some(b)) if a == b => format!("{what} {a} フレーム"),
+                        (Some(a), Some(b)) => format!("{what} {a}〜{b} フレーム"),
+                        _ => format!("{what}なし"),
+                    };
+                    let fi: Vec<u64> = spans.iter().filter(|s| s.fadein > 0).map(|s| s.fadein).collect();
+                    let fo: Vec<u64> = spans.iter().filter(|s| s.fadeout > 0).map(|s| s.fadeout).collect();
+                    ui.label(format!("ロゴの出ている区間 {} か所", spans.len()));
+                    if fi.is_empty() && fo.is_empty() {
+                        ui.label("フェードなし");
+                    } else {
+                        ui.label(format!("{}・{}", fade("フェードイン", fi), fade("フェードアウト", fo)));
+                    }
+                }
                 if let Some(call) = self.still_call() {
                     ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
-                    let hover = if self.range_on { "指定した範囲での呼び方" } else { "録画全体での呼び方（CM の間は外してください）" };
-                    if ui.button("コピー").on_hover_text(hover).clicked() {
-                        ctx.copy_text(call);
-                    }
+                    let hover = if self.found_spans().is_some() {
+                        "ロゴの出ている区間ごとの呼び方"
+                    } else if self.range_on {
+                        "指定した範囲での呼び方"
+                    } else {
+                        "録画全体での呼び方（CM の間は外してください）"
+                    };
+                    ui.horizontal(|ui| {
+                        if ui.button("コピー").on_hover_text(hover).clicked() {
+                            ctx.copy_text(call);
+                        }
+                        if let Some(t) = &self.spans_task {
+                            let (f, _) = t.progress();
+                            ui.add(egui::ProgressBar::new(f).show_percentage().desired_width(120.0));
+                            if ui.button("中止").clicked() {
+                                t.cancel.store(true, Ordering::Relaxed);
+                            }
+                        } else if ui
+                            .add_enabled(self.scan_task.is_none(), egui::Button::new("区間を探す"))
+                            .on_hover_text("録画を読み直して、ロゴの出ている区間（CM の間を除く）と、フェードする局ではフェードの長さを測ります")
+                            .clicked()
+                        {
+                            self.start_spans(&ctx);
+                        }
+                    });
                 }
             } else {
                 ui.label(egui::RichText::new("まだありません").weak());
@@ -1398,7 +1469,7 @@ fn erased_picture(path: &Path, info: &VideoInfo, logo: &Logo, at: f64, rgb: &[u8
         return Err("ロゴが絵の外にあります".into());
     }
     let rect = Rect { x: logo.x as u32, y: logo.y as u32, w: logo.w as u32, h: logo.h as u32 };
-    let opt = ReadOptions { start: Some(at), duration: None, step: 1, threads: 2, scan: Scan::Auto };
+    let opt = ReadOptions { start: Some(at), duration: None, step: 1, threads: 2, scan: Scan::Auto, on_the_clock: false };
     let frame = Reader::open(path, info, rect, &opt)
         .map_err(|e| e.to_string())?
         .next_frame()
@@ -1434,7 +1505,7 @@ fn erased_frame(path: &Path, info: &VideoInfo, logo: &Logo, start: Option<f64>, 
         return Err("ロゴが絵の外にあります".into());
     }
     let rect = Rect { x: logo.x as u32, y: logo.y as u32, w: logo.w as u32, h: logo.h as u32 };
-    let opt = ReadOptions { start, duration: None, step: 1, threads: 2, scan: Scan::Auto };
+    let opt = ReadOptions { start, duration: None, step: 1, threads: 2, scan: Scan::Auto, on_the_clock: false };
     let mut reader = Reader::open(path, info, rect, &opt).map_err(|e| e.to_string())?;
     let mut frame = None;
     for _ in 0..=n {
@@ -1476,7 +1547,7 @@ impl eframe::App for App {
         egui::Panel::right("side").default_size(380.0).min_size(300.0).show(ui, |ui| self.side_panel(ui));
         egui::Panel::bottom("bottom").show(ui, |ui| self.bottom_panel(ui));
         egui::CentralPanel::no_frame().show(ui, |ui| self.picture(ui));
-        if self.grab.is_some() || self.scan_task.is_some() || self.detect_task.is_some() || self.anim_task.is_some() {
+        if self.grab.is_some() || self.scan_task.is_some() || self.spans_task.is_some() || self.detect_task.is_some() || self.anim_task.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }

@@ -26,13 +26,23 @@ pub fn moving(ldp: &str, frames: usize, hold: Option<Hold>) -> String {
 }
 
 /// For a still logo: delogo's EraseLOGO, one call per stretch of the
-/// programme so the logo is not "removed" during commercials.
-pub fn still(lgd: &str) -> String {
+/// programme so the logo is not "removed" during commercials. `measured`
+/// is the chain of calls found in a recording, when it was looked for.
+pub fn still(lgd: &str, measured: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str(&format!("# {lgd} を delogo で使うサンプル（lgdscan が書きました）\n"));
-    s.push_str("# 本編の区間ごとに start と end を入れて並べます。CM の間は消さないでください（ロゴの形が浮き出ます）。\n");
-    s.push('\n');
-    s.push_str(&format!("#EraseLOGO(logofile=\"{lgd}\", start=300, end=15299, interlaced=true).EraseLOGO(logofile=\"{lgd}\", start=18000, end=32399, interlaced=true)\n"));
+    match measured {
+        Some(call) => {
+            s.push_str("# 録画からロゴの出ている区間を測った呼び方です。フェードする局では fadein と fadeout も測っています。\n");
+            s.push('\n');
+            s.push_str(&format!("#{call}\n"));
+        }
+        None => {
+            s.push_str("# 本編の区間ごとに start と end を入れて並べます。CM の間は消さないでください（ロゴの形が浮き出ます）。\n");
+            s.push('\n');
+            s.push_str(&format!("#EraseLOGO(logofile=\"{lgd}\", start=300, end=15299, interlaced=true).EraseLOGO(logofile=\"{lgd}\", start=18000, end=32399, interlaced=true)\n"));
+        }
+    }
     s.replace('\n', "\r\n")
 }
 
@@ -76,7 +86,14 @@ mod tests {
 
     #[test]
     fn still_sample_names_the_file() {
-        let t = still("ロゴ.lgd");
+        let t = still("ロゴ.lgd", None);
         assert!(t.contains("EraseLOGO(logofile=\"ロゴ.lgd\", start=300, end=15299, interlaced=true)"));
+    }
+
+    #[test]
+    fn still_sample_carries_the_measured_call() {
+        let t = still("a.lgd", Some("EraseLOGO(logofile=\"a.lgd\", start=5, end=9, fadein=2, interlaced=true)"));
+        assert!(t.contains("\r\n#EraseLOGO(logofile=\"a.lgd\", start=5, end=9, fadein=2, interlaced=true)\r\n"));
+        assert!(!t.contains("start=300"));
     }
 }

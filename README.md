@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/icon-256.png" width="112" alt="">
+
 # LogoScan
 
 **AviUtl's logo analysis, without AviUtl.**
@@ -51,9 +53,11 @@ Recordings can also be dropped on the window (hold Shift to add to the inputs in
    - Arrow keys move it by one pixel; Shift+arrows change its width and height.
    - The wheel zooms, a right or middle drag pans, a right double-click or *Fit* shows the whole picture.
      Past 2× the pixels are shown as they are.
-3. **Analyse.** When it finishes, the opacity of the logo appears as a greyscale image and the picture
-   switches to the logo removed. Move the slider to see how it holds up on other scenes.
+3. **Analyse.** When it finishes, the logo appears on a checkerboard — in its own colours, as translucent as
+   it is — and the picture switches to the logo removed. Move the slider to see how it holds up on other scenes.
 4. Name the logo and **Save**.
+5. **区間を探す** (Find the stretches) reads the recording again for where the logo is on screen and how it
+   fades (see "Where the logo is on screen" below); the call in the results becomes one `EraseLOGO` per stretch.
 
 For a moving logo, switch *Analyse* to **Moving logo** (see "A logo that moves" below). Open many recordings
 (*Add…*, or drop with Shift held), box the area the animation passes through and press **Analyse**. The result
@@ -89,6 +93,16 @@ lgdscan detect recording.ts
 
 prints candidates as `--rect X,Y,W,H`, most likely first. `--share` (edge share, 0.45), `--margin` (3)
 and `--samples` (keyframes, 120) can be changed.
+
+Where a logo is on screen in a recording:
+
+```
+lgdscan spans logo.lgd recording.ts
+```
+
+prints each stretch's frames and fades, and the chained `EraseLOGO` calls. `--start` / `--end` narrow what is
+read (frames still count from the recording's first); `--pictures` counts pictures rather than time (see
+"Where the logo is on screen"); `--depths FILE` also writes the share of the logo measured in each frame.
 
 Also:
 
@@ -183,8 +197,36 @@ The frame numbers are examples. Opening the recording and `LoadPlugin` are left 
 
 The window's results also show a call ready to use, with **コピー** (Copy) to put it on the clipboard: for a moving logo,
 at the chosen recording's start frame with the measured `end` and `fadeout`; for a station logo, over the analysed
-range (the whole recording when none is set), with `interlaced` from the scan type. That is one range, so split it
-round the commercials.
+range (the whole recording when none is set), with `interlaced` from the scan type. That is one range until
+**区間を探す** (Find the stretches) is pressed; then it is one call per stretch the logo is on screen, and the
+saved sample carries it too.
+
+## Where the logo is on screen
+
+`EraseLOGO` run where there is no logo prints the logo's shape into the picture, so it has to be called per
+stretch, leaving out the commercials. Some stations also fade their logo in after a break and out before one;
+there `fadein` and `fadeout` have to match too, or the logo lingers as it comes and goes. `lgdscan spans`
+(**区間を探す** in the window) measures all four.
+
+1. Each frame is measured for the share of the logo whose removal leaves the least step across the edges the
+   logo draws. The edges are taken in chroma as well as luma: a logo drawn in colours on an evenly translucent
+   plate has the same opacity everywhere, and its lettering shows only in colour.
+2. Where the logo would not show even if it were there — a white logo on white — the frame is left
+   undecided and the state before it carries on, so a white scene does not cut the programme in two.
+3. A second's median above half the logo is "on screen". Gaps under 5 seconds are closed, stretches under 3
+   seconds dropped.
+4. delogo's fade (from `start`, rising over `fadein` frames; falling over the `fadeout` frames up to `end`) is
+   fitted at each end. The fade lengths are shared by all the ends in the recording, as a station fades the
+   same way each time: fitted one end at a time, a scene as bright as the logo could stretch a fade badly.
+
+On five 30-minute recordings of a station that fades its logo, the fades came out at 27 to 30 frames (about a
+second), and the ends lie within a few frames of where the logo is seen to start and finish. For a station that
+does not fade, no `fadein` or `fadeout` is written.
+
+Frames are counted by the clock from the first picture that decodes at the start of the recording, so reading
+a range gives the same numbers. Broadcast recordings can carry pictures that repeat a field and show for a frame
+and a half; if your source filter counts pictures instead, the numbers drift apart further in, and
+`lgdscan spans --pictures` counts the same way (the window has no switch for it yet).
 
 ## Finding the logo
 
@@ -218,7 +260,8 @@ Two logos made from different episodes of the same programme differ by about as 
 
 ## Not yet
 
-- Fade in / fade out and the other fields (fi/fo/st/ed) are left at 0.
+- The fade fields of the .lgd header (fi/fo/st/ed) are left at 0; the fades go into the `EraseLOGO` calls
+  instead (see "Where the logo is on screen").
 - `scan` writes one logo per file.
 
 ## Building

@@ -108,6 +108,7 @@ pub fn run(job: &Job, progress: &mut dyn FnMut(&Progress), cancel: &AtomicBool) 
             step: job.step,
             threads: job.threads.min(8) as u32,
             scan: job.scan,
+            on_the_clock: false,
         };
         let span = match job.end {
             Some(e) => e - job.start.unwrap_or(0.0),

@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="256" height="256" viewBox="0 0 256 256">
+<defs>
+<filter id="filter-remove-color-and-invert-alpha" x="0%" y="0%" width="100%" height="100%">
+<feColorMatrix color-interpolation-filters="sRGB" values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 -1 1"/>
+</filter>
+<filter id="filter-0" x="0%" y="0%" width="100%" height="100%">
+<feImage xlink:href="#compositing-group-1" result="source" x="0" y="0" width="368.64" height="368.64"/>
+<feImage xlink:href="#compositing-group-2" result="destination" x="0" y="0" width="368.64" height="368.64"/>
+<feComposite in="source" in2="destination" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" color-interpolation-filters="sRGB"/>
+</filter>
+<filter id="filter-1" x="0%" y="0%" width="100%" height="100%">
+<feImage xlink:href="#compositing-group-4" result="source" x="0" y="0" width="368.64" height="368.64"/>
+<feImage xlink:href="#compositing-group-5" result="destination" x="0" y="0" width="368.64" height="368.64"/>
+<feComposite in="source" in2="destination" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" color-interpolation-filters="sRGB"/>
+</filter>
+<filter id="filter-2" x="0%" y="0%" width="100%" height="100%">
+<feImage xlink:href="#compositing-group-7" result="source" x="0" y="0" width="368.64" height="368.64"/>
+<feImage xlink:href="#compositing-group-8" result="destination" x="0" y="0" width="368.64" height="368.64"/>
+<feComposite in="source" in2="destination" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" color-interpolation-filters="sRGB"/>
+</filter>
+<linearGradient id="linear-pattern-0" gradientUnits="userSpaceOnUse" x1="0" y1="16" x2="0" y2="240">
+<stop offset="0" stop-color="rgb(17.254902%, 25.490196%, 43.921569%)" stop-opacity="1"/>
+<stop offset="1" stop-color="rgb(6.27451%, 9.019608%, 16.470588%)" stop-opacity="1"/>
+</linearGradient>
+<clipPath id="clip-0">
+<path clip-rule="nonzero" d="M 16 150 L 240 150 L 240 240 L 16 240 Z M 16 150 "/>
+</clipPath>
+<clipPath id="clip-1">
+<path clip-rule="nonzero" d="M 196 16 C 220.300781 16 240 35.699219 240 60 L 240 196 C 240 220.300781 220.300781 240 196 240 L 60 240 C 35.699219 240 16 220.300781 16 196 L 16 60 C 16 35.699219 35.699219 16 60 16 Z M 196 16 "/>
+</clipPath>
+<linearGradient id="linear-pattern-1" gradientUnits="userSpaceOnUse" x1="0" y1="120" x2="0" y2="240">
+<stop offset="0" stop-color="rgb(16.470588%, 54.901961%, 58.823529%)" stop-opacity="1"/>
+<stop offset="1" stop-color="rgb(9.019608%, 30.588235%, 38.823529%)" stop-opacity="1"/>
+</linearGradient>
+<clipPath id="clip-2">
+<path clip-rule="nonzero" d="M 16 188 L 240 188 L 240 240 L 16 240 Z M 16 188 "/>
+</clipPath>
+<clipPath id="clip-3">
+<path clip-rule="nonzero" d="M 196 16 C 220.300781 16 240 35.699219 240 60 L 240 196 C 240 220.300781 220.300781 240 196 240 L 60 240 C 35.699219 240 16 220.300781 16 196 L 16 60 C 16 35.699219 35.699219 16 60 16 Z M 196 16 "/>
+</clipPath>
+<linearGradient id="linear-pattern-2" gradientUnits="userSpaceOnUse" x1="0" y1="158" x2="0" y2="240">
+<stop offset="0" stop-color="rgb(11.372549%, 38.823529%, 45.098039%)" stop-opacity="1"/>
+<stop offset="1" stop-color="rgb(5.882353%, 17.254902%, 23.529412%)" stop-opacity="1"/>
+</linearGradient>
+<clipPath id="clip-4">
+<path clip-rule="nonzero" d="M 155 38 L 226 38 L 226 128 L 155 128 Z M 155 38 "/>
+</clipPath>
+<g id="compositing-group-0" transform="translate(56.32, 56.32)">
+<rect x="-56.32" y="-56.32" width="368.64" height="368.64" fill="rgb(0%, 0%, 0%)" fill-opacity="0"/>
+<path fill-rule="nonzero" fill="rgb(100%, 100%, 100%)" fill-opacity="1" d="M 131 64 C 136 78 136 78 150 83 C 136 88 136 88 131 102 C 126 88 126 88 112 83 C 126 78 126 78 131 64 Z M 131 64 "/>
+</g>
+<mask id="mask-0">
+<use xlink:href="#compositing-group-0"/>
+</mask>
+<mask id="mask-1">
+<use xlink:href="#compositing-group-0" filter="url(#filter-remove-color-and-invert-alpha)"/>
+</mask>
+<g id="compositing-group-1" mask="url(#mask-0)">
+<g transform="translate(56.32, 56.32)">
+</g>
+</g>
+<g id="compositing-group-2" mask="url(#mask-1)">
+<g transform="translate(56.32, 56.32)">
+<path fill-rule="nonzero" fill="rgb(100%, 100%, 100%)" fill-opacity="0.66" d="M 196 54 C 203.730469 54 210 60.269531 210 68 L 210 98 C 210 105.730469 203.730469 112 196 112 L 114 112 C 106.269531 112 100 105.730469 100 98 L 100 68 C 100 60.269531 106.269531 54 114 54 Z M 196 54 "/>
+</g>
+</g>
+<g id="compositing-group-3" transform="translate(56.32, 56.32)">
+<rect x="-56.32" y="-56.32" width="368.64" height="368.64" fill="rgb(0%, 0%, 0%)" fill-opacity="0"/>
+<path fill-rule="nonzero" fill="rgb(100%, 100%, 100%)" fill-opacity="1" d="M 189 71 C 191.761719 71 194 73.238281 194 76 C 194 78.761719 191.761719 81 189 81 L 163 81 C 160.238281 81 158 78.761719 158 76 C 158 73.238281 160.238281 71 163 71 Z M 189 71 "/>
+</g>
+<mask id="mask-2">
+<use xlink:href="#compositing-group-3"/>
+</mask>
+<mask id="mask-3">
+<use xlink:href="#compositing-group-3" filter="url(#filter-remove-color-and-invert-alpha)"/>
+</mask>
+<g id="compositing-group-4" mask="url(#mask-2)">
+<g transform="translate(56.32, 56.32)">
+</g>
+</g>
+<g id="compositing-group-5" mask="url(#mask-3)">
+<g transform="translate(56.32, 56.32)">
+<g filter="url(#filter-0)" transform="translate(-56.32, -56.32)">
+<rect x="0" y="0" width="368.64" height="368.64" fill="rgb(0%, 0%, 0%)" fill-opacity="1"/>
+</g>
+</g>
+</g>
+<g id="compositing-group-6" transform="translate(56.32, 56.32)">
+<rect x="-56.32" y="-56.32" width="368.64" height="368.64" fill="rgb(0%, 0%, 0%)" fill-opacity="0"/>
+<path fill-rule="nonzero" fill="rgb(100%, 100%, 100%)" fill-opacity="1" d="M 175 85 C 177.761719 85 180 87.238281 180 90 C 180 92.761719 177.761719 95 175 95 L 163 95 C 160.238281 95 158 92.761719 158 90 C 158 87.238281 160.238281 85 163 85 Z M 175 85 "/>
+</g>
+<mask id="mask-4">
+<use xlink:href="#compositing-group-6"/>
+</mask>
+<mask id="mask-5">
+<use xlink:href="#compositing-group-6" filter="url(#filter-remove-color-and-invert-alpha)"/>
+</mask>
+<g id="compositing-group-7" mask="url(#mask-4)">
+<g transform="translate(56.32, 56.32)">
+</g>
+</g>
+<g id="compositing-group-8" mask="url(#mask-5)">
+<g transform="translate(56.32, 56.32)">
+<g filter="url(#filter-1)" transform="translate(-56.32, -56.32)">
+<rect x="0" y="0" width="368.64" height="368.64" fill="rgb(0%, 0%, 0%)" fill-opacity="1"/>
+</g>
+</g>
+</g>
+<clipPath id="clip-5">
+<rect x="0" y="0" width="256" height="256"/>
+</clipPath>
+<g id="source-5" clip-path="url(#clip-5)">
+<g filter="url(#filter-2)" transform="translate(-56.32, -56.32)">
+<rect x="0" y="0" width="368.64" height="368.64" fill="rgb(0%, 0%, 0%)" fill-opacity="1"/>
+</g>
+</g>
+</defs>
+<path fill-rule="nonzero" fill="url(#linear-pattern-0)" d="M 196 16 C 220.300781 16 240 35.699219 240 60 L 240 196 C 240 220.300781 220.300781 240 196 240 L 60 240 C 35.699219 240 16 220.300781 16 196 L 16 60 C 16 35.699219 35.699219 16 60 16 Z M 196 16 "/>
+<g clip-path="url(#clip-0)">
+<g clip-path="url(#clip-1)">
+<path fill-rule="nonzero" fill="url(#linear-pattern-1)" d="M 16 176 C 90 132 150 180 240 150 L 240 240 L 16 240 Z M 16 176 "/>
+</g>
+</g>
+<g clip-path="url(#clip-2)">
+<g clip-path="url(#clip-3)">
+<path fill-rule="nonzero" fill="url(#linear-pattern-2)" d="M 16 206 C 90 162 150 218 240 188 L 240 240 L 16 240 Z M 16 206 "/>
+</g>
+</g>
+<g clip-path="url(#clip-4)">
+<path fill-rule="nonzero" fill="rgb(27.843137%, 31.372549%, 40%)" fill-opacity="1" d="M 216 38 C 221.523438 38 226 42.476562 226 48 L 226 118 C 226 123.523438 221.523438 128 216 128 L 94 128 C 88.476562 128 84 123.523438 84 118 L 84 48 C 84 42.476562 88.476562 38 94 38 Z M 216 38 "/>
+<path fill-rule="nonzero" fill="rgb(18.431373%, 21.176471%, 28.235294%)" fill-opacity="1" d="M 155 49 L 166 49 L 166 60 L 155 60 Z M 155 71 L 166 71 L 166 82 L 155 82 Z M 155 93 L 166 93 L 166 104 L 155 104 Z M 155 115 L 166 115 L 166 126 L 155 126 Z M 166 38 L 177 38 L 177 49 L 166 49 Z M 166 60 L 177 60 L 177 71 L 166 71 Z M 166 82 L 177 82 L 177 93 L 166 93 Z M 166 104 L 177 104 L 177 115 L 166 115 Z M 166 126 L 177 126 L 177 137 L 166 137 Z M 177 49 L 188 49 L 188 60 L 177 60 Z M 177 71 L 188 71 L 188 82 L 177 82 Z M 177 93 L 188 93 L 188 104 L 177 104 Z M 177 115 L 188 115 L 188 126 L 177 126 Z M 188 38 L 199 38 L 199 49 L 188 49 Z M 188 60 L 199 60 L 199 71 L 188 71 Z M 188 82 L 199 82 L 199 93 L 188 93 Z M 188 104 L 199 104 L 199 115 L 188 115 Z M 188 126 L 199 126 L 199 137 L 188 137 Z M 199 49 L 210 49 L 210 60 L 199 60 Z M 199 71 L 210 71 L 210 82 L 199 82 Z M 199 93 L 210 93 L 210 104 L 199 104 Z M 199 115 L 210 115 L 210 126 L 199 126 Z M 210 38 L 221 38 L 221 49 L 210 49 Z M 210 60 L 221 60 L 221 71 L 210 71 Z M 210 82 L 221 82 L 221 93 L 210 93 Z M 210 104 L 221 104 L 221 115 L 210 115 Z M 210 126 L 221 126 L 221 137 L 210 137 Z M 221 49 L 232 49 L 232 60 L 221 60 Z M 221 71 L 232 71 L 232 82 L 221 82 Z M 221 93 L 232 93 L 232 104 L 221 104 Z M 221 115 L 232 115 L 232 126 L 221 126 Z M 221 115 "/>
+</g>
+<use xlink:href="#source-5"/>
+<path fill="none" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" stroke="rgb(100%, 70.980392%, 27.843137%)" stroke-opacity="1" stroke-miterlimit="10" d="M 106 38 L 84 38 L 84 60 "/>
+<path fill="none" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" stroke="rgb(100%, 70.980392%, 27.843137%)" stroke-opacity="1" stroke-miterlimit="10" d="M 204 38 L 226 38 L 226 60 "/>
+<path fill="none" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" stroke="rgb(100%, 70.980392%, 27.843137%)" stroke-opacity="1" stroke-miterlimit="10" d="M 106 128 L 84 128 L 84 106 "/>
+<path fill="none" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" stroke="rgb(100%, 70.980392%, 27.843137%)" stroke-opacity="1" stroke-miterlimit="10" d="M 204 128 L 226 128 L 226 106 "/>
+<path fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" stroke="rgb(100%, 83.529412%, 54.117647%)" stroke-opacity="0.14" stroke-miterlimit="10" d="M 155 30 L 155 136 "/>
+<path fill="none" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" stroke="rgb(100%, 83.529412%, 54.117647%)" stroke-opacity="0.28" stroke-miterlimit="10" d="M 155 30 L 155 136 "/>
+<path fill="none" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" stroke="rgb(100%, 83.529412%, 54.117647%)" stroke-opacity="1" stroke-miterlimit="10" d="M 155 30 L 155 136 "/>
+</svg>

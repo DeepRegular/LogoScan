@@ -6,3 +6,4 @@ pub mod job;
 pub mod lgd;
 pub mod scan;
 pub mod source;
+pub mod spans;

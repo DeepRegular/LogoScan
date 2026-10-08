@@ -50,6 +50,18 @@ usage:
                              a sample AviSynth script for the logo file:
                              delogomod's EraseLogomod for an .ldp, delogo's
                              EraseLOGO for an .lgd (default: beside it, .avs)
+  lgdscan spans LOGO.lgd INPUT [options]
+                             where the station logo is on screen, and how
+                             it fades in and out: prints delogo's EraseLOGO
+                             with start, end, fadein and fadeout per stretch
+      --start SEC / --end SEC  range to read (frames still count from the
+                             recording's first)
+      --scan auto|progressive|interlaced  for interlaced= (default auto)
+      --pictures             count frames by picture rather than by time:
+                             a picture that repeats a field (shown for a
+                             frame and a half) is then one frame
+      --depths FILE          also write each frame's share of the logo
+      --threads N            (default: all cores)
   lgdscan detect INPUT [--samples N] [--share S] [--margin M] [--start SEC] [--end SEC]
                              find logo positions; prints --rect candidates
       --samples N            keyframes spread over the input (default 120)
@@ -70,6 +82,7 @@ fn main() -> ExitCode {
         Some("detect") => cmd_detect(&args[1..]),
         Some("anim") => cmd_anim(&args[1..]),
         Some("avs") => cmd_avs(&args[1..]),
+        Some("spans") => cmd_spans(&args[1..]),
         Some("info") if args.len() == 2 => cmd_info(Path::new(&args[1])),
         Some("compare") if args.len() == 3 => cmd_compare(Path::new(&args[1]), Path::new(&args[2])),
         Some("render") if args.len() == 3 => cmd_render(Path::new(&args[1]), Path::new(&args[2])),
@@ -121,14 +134,7 @@ fn cmd_scan(args: &[String]) -> Res {
                     v => return Err(format!("unknown background {v}").into()),
                 }
             }
-            "--scan" => {
-                scan_mode = match val()?.as_str() {
-                    "auto" => Scan::Auto,
-                    "progressive" => Scan::Progressive,
-                    "interlaced" => Scan::Interlaced,
-                    v => return Err(format!("unknown scan {v}").into()),
-                }
-            }
+            "--scan" => scan_mode = parse_scan(val()?)?,
             "--max-frames" => max_frames = val()?.parse()?,
             "--passes" => passes = val()?.parse()?,
             "--threads" => threads = val()?.parse::<usize>()?.max(1),
@@ -312,12 +318,80 @@ fn cmd_avs(args: &[String]) -> Res {
         };
         lgdscan::avs::moving(&name, logos.len(), hold)
     } else {
-        lgdscan::avs::still(&name)
+        lgdscan::avs::still(&name, None)
     };
     let output = output.unwrap_or_else(|| lgdscan::avs::path_for(&logo));
     lgdscan::avs::write(&output, &text)?;
     eprintln!("wrote {}", output.display());
     Ok(())
+}
+
+fn cmd_spans(args: &[String]) -> Res {
+    let mut paths = Vec::new();
+    let (mut start, mut end) = (None, None);
+    let mut scan = Scan::Auto;
+    let mut depths_out: Option<PathBuf> = None;
+    let mut pictures = false;
+    let mut threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u32;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().ok_or_else(|| format!("{a} needs a value"));
+        match a.as_str() {
+            "--start" => start = Some(val()?.parse::<f64>()?),
+            "--end" => end = Some(val()?.parse::<f64>()?),
+            "--scan" => scan = parse_scan(val()?)?,
+            "--depths" => depths_out = Some(PathBuf::from(val()?)),
+            "--pictures" => pictures = true,
+            "--threads" => threads = val()?.parse()?,
+            s if s.starts_with('-') => return Err(format!("unknown option {s}").into()),
+            s => paths.push(PathBuf::from(s)),
+        }
+    }
+    let [logo_path, input] = paths.as_slice() else { return Err("give the .lgd and one input".into()) };
+    let logo = load(logo_path)?.into_iter().next().ok_or("no logo in the file")?;
+    let info = source::probe(input)?;
+    let duration = end.map(|e| e - start.unwrap_or(0.0));
+    let opt = ReadOptions { start, duration, step: 1, threads, scan, on_the_clock: !pictures };
+    let t0 = Instant::now();
+    let (depths, offset) = lgdscan::spans::measure(input, &info, &logo, &opt, &|f| eprint!("\r  {:3.0}%", f * 100.0), &AtomicBool::new(false))?;
+    eprintln!("\r{} frames in {:.1}s", depths.len(), t0.elapsed().as_secs_f64());
+    if let Some(p) = depths_out {
+        let mut w = BufWriter::new(File::create(&p)?);
+        for (i, d) in depths.iter().enumerate() {
+            writeln!(w, "{i} {d:.2}")?;
+        }
+        w.flush()?;
+    }
+    let spans = lgdscan::spans::find(&depths, info.frame_rate);
+    if spans.is_empty() {
+        return Err("the logo is not on screen anywhere in what was read".into());
+    }
+    for s in &spans {
+        println!(
+            "frames {}-{}  fadein {}  fadeout {}",
+            s.start + offset,
+            s.end + offset,
+            s.fadein,
+            s.fadeout
+        );
+    }
+    let interlaced = match scan {
+        Scan::Auto => info.interlaced,
+        Scan::Progressive => false,
+        Scan::Interlaced => true,
+    };
+    let name = logo_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    println!("{}", lgdscan::spans::erase_call(&name, &spans, offset, interlaced));
+    Ok(())
+}
+
+fn parse_scan(v: &str) -> Result<Scan, Box<dyn std::error::Error>> {
+    Ok(match v {
+        "auto" => Scan::Auto,
+        "progressive" => Scan::Progressive,
+        "interlaced" => Scan::Interlaced,
+        v => return Err(format!("unknown scan {v}").into()),
+    })
 }
 
 fn parse_rect(v: &str) -> Result<Rect, Box<dyn std::error::Error>> {
@@ -441,7 +515,7 @@ fn cmd_erase(lgd_path: &Path, video: &Path, at: &str, out: &Path) -> Res {
     let x1 = (l.x as u32 + l.w as u32 + m).min(info.width);
     let y1 = (l.y as u32 + l.h as u32 + m).min(info.height);
     let rect = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-    let opt = ReadOptions { start: Some(at.parse()?), duration: None, step: 1, threads: 4, scan: Scan::Auto };
+    let opt = ReadOptions { start: Some(at.parse()?), duration: None, step: 1, threads: 4, scan: Scan::Auto, on_the_clock: false };
     let frame = Reader::open(video, &info, rect, &opt)?.next_frame()?.ok_or("no frame at that time")?;
     let (w, h) = (rect.w as usize, rect.h as usize);
     let hd = source::is_hd(&info);
