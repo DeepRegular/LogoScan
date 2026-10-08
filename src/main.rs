@@ -46,16 +46,18 @@ usage:
       --search N             largest shift between recordings, in frames
                              (default 90)
       --threads N            (default: all cores)
-  lgdscan avs LOGO.ldp|LOGO.lgd [--end N --fadeout N] [-o FILE.avs]
+  lgdscan avs LOGO.ldp|LOGO.lgd [--end N] [--fadein N] [--fadeout N] [-o FILE.avs]
                              a sample AviSynth script for the logo file:
                              delogomod's EraseLogomod for an .ldp, delogo's
-                             EraseLOGO for an .lgd (default: beside it, .avs)
+                             EraseLOGO for an .lgd (default: beside it, .avs);
+                             --end and --fadeout for an .ldp, --fadein and
+                             --fadeout for an .lgd go into the calls
   lgdscan spans LOGO.lgd INPUT [options]
                              where the station logo is on screen, and how
                              it fades in and out: prints delogo's EraseLOGO
                              with start, end, fadein and fadeout per stretch
-                             (also written into the sample beside the .lgd,
-                             with .avs)
+                             (the fades also go into the sample beside the
+                             .lgd, with .avs)
       --start SEC / --end SEC  range to read (frames still count from the
                              recording's first)
       --scan auto|progressive|interlaced  for interlaced= (default auto)
@@ -310,13 +312,14 @@ fn cmd_anim(args: &[String]) -> Res {
 fn cmd_avs(args: &[String]) -> Res {
     let mut logo: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
-    let (mut end, mut fade) = (None, None);
+    let (mut end, mut fade, mut fadein) = (None, None, None);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
             "--end" => end = Some(val()?.parse::<i64>()?),
             "--fadeout" => fade = Some(val()?.parse::<i64>()?),
+            "--fadein" => fadein = Some(val()?.parse::<u64>()?),
             "-o" | "--output" => output = Some(PathBuf::from(val()?)),
             s if s.starts_with('-') => return Err(format!("unknown option {s}").into()),
             s => logo = Some(PathBuf::from(s)),
@@ -327,6 +330,9 @@ fn cmd_avs(args: &[String]) -> Res {
     let name = logo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let moving = logo.extension().is_some_and(|e| e.eq_ignore_ascii_case("ldp")) || logos.len() > 1;
     let text = if moving {
+        if fadein.is_some() {
+            return Err("--fadein is for an .lgd (delogomod fades a moving logo out only)".into());
+        }
         let hold = match (end, fade) {
             (Some(end), Some(fadeout)) => Some(anim::Hold { end, fadeout }),
             (None, None) => None,
@@ -334,7 +340,12 @@ fn cmd_avs(args: &[String]) -> Res {
         };
         lgdscan::avs::moving(&name, logos.len(), hold)
     } else {
-        lgdscan::avs::still(&name, None)
+        if end.is_some() {
+            return Err("--end is for an .ldp".into());
+        }
+        let fadeout = fade.map(u64::try_from).transpose().map_err(|_| "--fadeout cannot be negative")?;
+        let fades = lgdscan::spans::Fades { fadein, fadeout };
+        lgdscan::avs::still(&name, fades)
     };
     let output = output.unwrap_or_else(|| lgdscan::avs::path_for(&logo));
     if output == logo {
@@ -385,7 +396,7 @@ fn cmd_spans(args: &[String]) -> Res {
         }
         w.flush()?;
     }
-    let spans = lgdscan::spans::find(&depths, info.frame_rate);
+    let (spans, fades) = lgdscan::spans::find_with_fades(&depths, info.frame_rate);
     if spans.is_empty() {
         return Err("the logo is not on screen anywhere in what was read".into());
     }
@@ -407,7 +418,7 @@ fn cmd_spans(args: &[String]) -> Res {
     let call = lgdscan::spans::erase_call(&name, &spans, offset, interlaced);
     println!("{call}");
     let sample = lgdscan::avs::path_for(logo_path);
-    lgdscan::avs::write(&sample, &lgdscan::avs::still(&name, Some(&call)))?;
+    lgdscan::avs::write(&sample, &lgdscan::avs::still(&name, fades))?;
     eprintln!("wrote the sample {}", sample.display());
     Ok(())
 }

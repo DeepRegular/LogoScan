@@ -14,7 +14,7 @@ use lgdscan::job::{self, Job, Outcome};
 use lgdscan::lgd::{self, Logo};
 use lgdscan::scan::Background;
 use lgdscan::source::{self, ReadOptions, Reader, Rect, Scan, VideoInfo};
-use lgdscan::spans::{self, Span};
+use lgdscan::spans::{self, Fades, Span};
 
 fn main() -> eframe::Result {
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
@@ -62,6 +62,10 @@ fn install_fonts(ctx: &egui::Context) {
 }
 
 /// Work on another thread, with progress and a way to stop it.
+/// The stretches found in an input: the input, the stretches, the first
+/// frame read, and the station's fades.
+type Found = (PathBuf, Vec<Span>, u64, Fades);
+
 struct Task<T> {
     rx: mpsc::Receiver<Result<T, String>>,
     cancel: Arc<AtomicBool>,
@@ -226,8 +230,8 @@ struct App {
     outcome: Option<Outcome>,
     /// Where the station logo is on screen in the first input, and the
     /// frame the stretches count from.
-    spans_task: Option<Task<(PathBuf, Vec<Span>, u64)>>,
-    spans: Option<(PathBuf, Vec<Span>, u64)>,
+    spans_task: Option<Task<Found>>,
+    spans: Option<Found>,
     /// Where the logo shown was last saved, so stretches found after the
     /// save can still go into the sample beside it.
     saved: Option<PathBuf>,
@@ -482,7 +486,7 @@ impl App {
                     // beside it was written without them.
                     if let Some(path) = self.saved.clone().filter(|_| self.write_sample) {
                         self.status = match self.write_still_sample(&path) {
-                            Ok(sample) => format!("{}。サンプル {} に書き足しました", self.status, sample.display()),
+                            Ok(sample) => format!("{}。サンプル {} にフェードを書きました", self.status, sample.display()),
                             Err(e) => format!("{}。サンプルは書けません: {e}", self.status),
                         };
                     }
@@ -656,15 +660,32 @@ impl App {
             Scan::Interlaced => true,
         };
         let lgd = if self.name.is_empty() { "logo.lgd".to_string() } else { format!("{}.lgd", self.name) };
-        if let Some((_, spans, offset)) = self.found_spans() {
+        if let Some((_, spans, offset, _)) = self.found_spans() {
             return Some(spans::erase_call(&lgd, spans, *offset, interlaced));
         }
         Some(format!("EraseLOGO(logofile=\"{lgd}\", start={start}, end={end}, interlaced={interlaced})"))
     }
 
     /// The stretches found, while they still belong to the first input.
-    fn found_spans(&self) -> Option<&(PathBuf, Vec<Span>, u64)> {
-        self.spans.as_ref().filter(|(p, _, _)| self.inputs.first() == Some(p))
+    fn found_spans(&self) -> Option<&Found> {
+        self.spans.as_ref().filter(|(p, ..)| self.inputs.first() == Some(p))
+    }
+
+    /// Saves the calls for the recording read, as a script of its own.
+    fn save_recording_avs(&mut self, call: &str) {
+        let Some(input) = self.inputs.first() else { return };
+        let video = input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = input.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let lgd = if self.name.is_empty() { "logo.lgd".to_string() } else { format!("{}.lgd", self.name) };
+        let Some(path) = rfd::FileDialog::new().add_filter("AviSynth", &["avs"]).set_file_name(format!("{stem}.avs")).save_file() else { return };
+        if self.inputs.iter().any(|p| p == &path) {
+            self.status = "録画と同じファイルには書けません".into();
+            return;
+        }
+        self.status = match lgdscan::avs::write(&path, &lgdscan::avs::recording(&lgd, &video, call)) {
+            Ok(()) => format!("{} に書きました", path.display()),
+            Err(e) => format!("書けません: {e}"),
+        };
     }
 
     /// The message for a saved .lgd, after writing its sample script.
@@ -679,17 +700,12 @@ impl App {
         }
     }
 
-    /// Writes the sample beside a .lgd, with the stretches when found.
+    /// Writes the sample beside a .lgd, with the fades when measured.
     fn write_still_sample(&self, path: &Path) -> Result<PathBuf, String> {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let sample = lgdscan::avs::path_for(path);
-        let interlaced = match self.scan {
-            Scan::Auto => self.info.as_ref().is_some_and(|i| i.interlaced),
-            Scan::Progressive => false,
-            Scan::Interlaced => true,
-        };
-        let measured = self.found_spans().map(|(_, s, offset)| spans::erase_call(&name, s, *offset, interlaced));
-        lgdscan::avs::write(&sample, &lgdscan::avs::still(&name, measured.as_deref()))?;
+        let fades = self.found_spans().map(|f| f.3).unwrap_or_default();
+        lgdscan::avs::write(&sample, &lgdscan::avs::still(&name, fades))?;
         Ok(sample)
     }
 
@@ -898,7 +914,8 @@ impl App {
         self.spans_task = Some(Task::spawn(ctx, move |cancel, report| {
             let (depths, offset) =
                 spans::measure(&path, &info, &logo, &opt, &|f| report(f as f32, "ロゴの出ている区間を探しています…".into()), cancel)?;
-            Ok((path, spans::find(&depths, info.frame_rate), offset))
+            let (found, fades) = spans::find_with_fades(&depths, info.frame_rate);
+            Ok((path, found, offset, fades))
         }));
     }
 
@@ -1213,20 +1230,14 @@ impl App {
                     ui.checkbox(&mut self.write_sample, "サンプルの .avs も書く")
                         .on_hover_text("delogo での使い方を、.lgd と同じ名前の .avs に書きます");
                 });
-                if let Some((_, spans, _)) = self.found_spans() {
-                    let fade = |what: &str, v: Vec<u64>| match (v.iter().min(), v.iter().max()) {
-                        (Some(a), Some(b)) if a == b => format!("{what} {a} フレーム"),
-                        (Some(a), Some(b)) => format!("{what} {a}〜{b} フレーム"),
-                        _ => format!("{what}なし"),
+                if let Some((_, spans, _, fades)) = self.found_spans() {
+                    let fade = |what: &str, v: Option<u64>| match v {
+                        Some(0) => format!("{what}なし"),
+                        Some(f) => format!("{what} {f} フレーム"),
+                        None => format!("{what}は測れず"),
                     };
-                    let fi: Vec<u64> = spans.iter().filter(|s| s.fadein > 0).map(|s| s.fadein).collect();
-                    let fo: Vec<u64> = spans.iter().filter(|s| s.fadeout > 0).map(|s| s.fadeout).collect();
                     ui.label(format!("ロゴの出ている区間 {} か所", spans.len()));
-                    if fi.is_empty() && fo.is_empty() {
-                        ui.label("フェードなし");
-                    } else {
-                        ui.label(format!("{}・{}", fade("フェードイン", fi), fade("フェードアウト", fo)));
-                    }
+                    ui.label(format!("{}・{}", fade("フェードイン", fades.fadein), fade("フェードアウト", fades.fadeout)));
                 }
                 if let Some(call) = self.still_call() {
                     ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
@@ -1239,8 +1250,13 @@ impl App {
                     };
                     ui.horizontal(|ui| {
                         if ui.button("コピー").on_hover_text(hover).clicked() {
-                            ctx.copy_text(call);
+                            ctx.copy_text(call.clone());
                         }
+                        if ui.button("この録画用の .avs を保存…").on_hover_text("この呼び出しを、読み込んだ録画専用のスクリプトとして書きます").clicked() {
+                            self.save_recording_avs(&call);
+                        }
+                    });
+                    ui.horizontal(|ui| {
                         if let Some(t) = &self.spans_task {
                             let (f, _) = t.progress();
                             ui.add(egui::ProgressBar::new(f).show_percentage().desired_width(120.0));

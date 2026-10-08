@@ -58,7 +58,8 @@ Recordings can also be dropped on the window (hold Shift to add to the inputs in
 4. Name the logo and **Save**.
 5. **ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) reads the recording again
    (see "Where the logo is on screen" below); the call in the results becomes one `EraseLOGO` per stretch,
-   and the sample .avs written in step 4 is written again with it.
+   and the sample .avs written in step 4 takes the measured fades. **この録画用の .avs を保存…** (Save an .avs for
+   this recording) writes that recording's own script.
 
 For a moving logo, switch *Analyse* to **Moving logo** (see "A logo that moves" below). Open many recordings
 (*Add…*, or drop with Shift held), box the area the animation passes through and press **Analyse**. The result
@@ -180,7 +181,7 @@ file, the count may start a frame or two apart, so check the result.
 Each logo file gets a sample of how to use it, an .avs of the same name (CP932, CRLF line ends). `lgdscan anim`
 always writes one beside the .ldp and `lgdscan spans` beside the .lgd; the window writes one on saving while
 *also write a sample .avs* is ticked, and again when **ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) finishes after the save;
-`lgdscan avs logo.ldp --end 232 --fadeout 22` or `lgdscan avs logo.lgd` writes one afterwards.
+`lgdscan avs logo.ldp --end 232 --fadeout 22` or `lgdscan avs logo.lgd --fadein 21 --fadeout 28` writes one afterwards.
 
 For an .ldp it is a plain call of delogomod's `EraseLogomod`, with the measured `end` and `fadeout`:
 
@@ -189,10 +190,12 @@ For an .ldp it is a plain call of delogomod's `EraseLogomod`, with the measured 
 #EraseLogomod(logofile="anim.ldp", start=0, end=232-20, fadeout=22, logo_start=20)
 ```
 
-For an .lgd it is delogo's `EraseLOGO`, one call per stretch of the programme:
+For an .lgd it is delogo's `EraseLOGO`, one call per stretch of the programme, with the measured `fadein` and
+`fadeout` once the fades have been measured (none for a station whose logo does not fade); the frame numbers stay
+examples:
 
 ```
-#EraseLOGO(logofile="logo.lgd", start=300, end=15299, interlaced=true).EraseLOGO(logofile="logo.lgd", start=18000, end=32399, interlaced=true)
+#EraseLOGO(logofile="logo.lgd", start=300, end=15299, fadein=21, fadeout=28, interlaced=true).EraseLOGO(logofile="logo.lgd", start=18000, end=32399, fadein=21, fadeout=28, interlaced=true)
 ```
 
 The frame numbers are examples. Opening the recording and `LoadPlugin` are left to your own script.
@@ -200,8 +203,8 @@ The frame numbers are examples. Opening the recording and `LoadPlugin` are left 
 The window's results also show a call ready to use, with **コピー** (Copy) to put it on the clipboard: for a moving logo,
 at the chosen recording's start frame with the measured `end` and `fadeout`; for a station logo, over the analysed
 range (the whole recording when none is set), with `interlaced` from the scan type. That is one range until
-**ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) is pressed; then it is one call per stretch the logo is on screen, and the
-sample carries it too, whether it was saved before or after.
+**ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) is pressed; then it is one call per stretch the logo is on screen. The sample takes only the measured fades;
+**この録画用の .avs を保存…** (Save an .avs for this recording) writes the line itself as a script of its own.
 
 ## Where the logo is on screen
 

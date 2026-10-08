@@ -256,9 +256,23 @@ fn common_length(fits: &[Vec<(f64, i64)>]) -> usize {
 
 /// The stretches the logo is on screen in, from the depths of each frame.
 pub fn find(depths: &[f32], frame_rate: f64) -> Vec<Span> {
+    find_with_fades(depths, frame_rate).0
+}
+
+/// The station's fade in and out, in frames: `None` when the recording
+/// shows no logo coming (or going) that could be measured, 0 when it was
+/// seen and does not fade.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fades {
+    pub fadein: Option<u64>,
+    pub fadeout: Option<u64>,
+}
+
+/// The stretches, and the fades they were fitted with.
+pub fn find_with_fades(depths: &[f32], frame_rate: f64) -> (Vec<Span>, Fades) {
     let n = depths.len();
     if n == 0 {
-        return Vec::new();
+        return (Vec::new(), Fades::default());
     }
     let fps = if frame_rate > 0.0 { frame_rate } else { 30000.0 / 1001.0 };
     let frames = |sec: f64| (sec * fps).round() as usize;
@@ -275,7 +289,7 @@ pub fn find(depths: &[f32], frame_rate: f64) -> Vec<Span> {
             median(w).map(|m| m >= 0.5)
         })
         .collect();
-    let Some(first) = said.iter().flatten().next().copied() else { return Vec::new() };
+    let Some(first) = said.iter().flatten().next().copied() else { return (Vec::new(), Fades::default()) };
     let on: Vec<bool> = said
         .iter()
         .scan(first, |last, s| {
@@ -358,7 +372,11 @@ pub fn find(depths: &[f32], frame_rate: f64) -> Vec<Span> {
         }
         spans.push(span);
     }
-    spans
+    // A fade was measured when some edge was fitted at all.
+    let in_seen = ins.iter().any(|f| matches!(f, Some(Some(_))));
+    let out_seen = outs.iter().any(|f| matches!(f, Some(Some(_))));
+    let fades = Fades { fadein: in_seen.then_some(fadein as u64), fadeout: out_seen.then_some(fadeout as u64) };
+    (spans, fades)
 }
 
 /// One EraseLOGO call per stretch, chained, with the frames moved on by
@@ -411,6 +429,7 @@ mod tests {
             *v = 0.0;
         }
         assert_eq!(find(&d, 30000.0 / 1001.0), want);
+        assert_eq!(find_with_fades(&d, 30000.0 / 1001.0).1, Fades { fadein: Some(21), fadeout: Some(28) });
     }
 
     #[test]
@@ -431,6 +450,8 @@ mod tests {
         let want = [Span { start: 0, end: 8999, fadein: 0, fadeout: 0 }];
         let d = trace(9000, &want, 1.0);
         assert_eq!(find(&d, 29.97), want);
+        // Nothing comes or goes: the fades are not known, not none.
+        assert_eq!(find_with_fades(&d, 29.97).1, Fades::default());
     }
 
     #[test]

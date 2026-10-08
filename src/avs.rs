@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use crate::anim::Hold;
+use crate::spans::Fades;
 
 /// For a moving logo: EraseLogomod applies the logos in the .ldp one per
 /// frame from `start`, then holds the last until `end`, fading it out.
@@ -26,23 +27,46 @@ pub fn moving(ldp: &str, frames: usize, hold: Option<Hold>) -> String {
 }
 
 /// For a still logo: delogo's EraseLOGO, one call per stretch of the
-/// programme so the logo is not "removed" during commercials. `measured`
-/// is the chain of calls found in a recording, when it was looked for.
-pub fn still(lgd: &str, measured: Option<&str>) -> String {
+/// programme so the logo is not "removed" during commercials. The frame
+/// numbers are examples; `fades` are the station's, when measured.
+pub fn still(lgd: &str, fades: Fades) -> String {
     let mut s = String::new();
     s.push_str(&format!("# {lgd} を delogo で使うサンプル（lgdscan が書きました）\n"));
-    match measured {
-        Some(call) => {
-            s.push_str("# 録画からロゴの出ている区間を測った呼び方です。フェードする局では fadein と fadeout も測っています。\n");
-            s.push('\n');
-            s.push_str(&format!("#{call}\n"));
-        }
-        None => {
-            s.push_str("# 本編の区間ごとに start と end を入れて並べます。CM の間は消さないでください（ロゴの形が浮き出ます）。\n");
-            s.push('\n');
-            s.push_str(&format!("#EraseLOGO(logofile=\"{lgd}\", start=300, end=15299, interlaced=true).EraseLOGO(logofile=\"{lgd}\", start=18000, end=32399, interlaced=true)\n"));
+    s.push_str("# 本編の区間ごとに start と end を入れて並べます。CM の間は消さないでください（ロゴの形が浮き出ます）。\n");
+    let mut fade = String::new();
+    match (fades.fadein, fades.fadeout) {
+        (None, None) => s.push_str("# ロゴがフェードする局では、fadein と fadeout にフェードのフレーム数を入れます。\n"),
+        (Some(0) | None, Some(0) | None) => s.push_str("# 録画から測ったところ、ロゴはフェードせずに出入りします。\n"),
+        (fadein, fadeout) => {
+            s.push_str("# fadein と fadeout は、ロゴが出るとき・消えるときのフェードを録画から測った値です。\n");
+            if let Some(f @ 1..) = fadein {
+                fade.push_str(&format!(", fadein={f}"));
+            }
+            if let Some(f @ 1..) = fadeout {
+                fade.push_str(&format!(", fadeout={f}"));
+            }
         }
     }
+    for (what, v) in [("出る", fades.fadein), ("消える", fades.fadeout)] {
+        if v.is_none() && (fades.fadein.is_some() || fades.fadeout.is_some()) {
+            s.push_str(&format!("# 録画にロゴが{what}ところが無く、そちらのフェードは測れていません。\n"));
+        }
+    }
+    s.push('\n');
+    s.push_str(&format!(
+        "#EraseLOGO(logofile=\"{lgd}\", start=300, end=15299{fade}, interlaced=true).EraseLOGO(logofile=\"{lgd}\", start=18000, end=32399{fade}, interlaced=true)\n"
+    ));
+    s.replace('\n', "\r\n")
+}
+
+/// For a still logo in one recording: the chain of calls found in it.
+pub fn recording(lgd: &str, video: &str, call: &str) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("# {video} で {lgd} を使う呼び出し（lgdscan が書きました）\n"));
+    s.push_str("# ロゴの出ている区間ごとに、録画から測った start・end・fadein・fadeout で並べています。\n");
+    s.push_str("# フレーム番号は lgdscan が読んだ最初のフレームを 0 として数えています。\n");
+    s.push('\n');
+    s.push_str(&format!("{call}\n"));
     s.replace('\n', "\r\n")
 }
 
@@ -86,14 +110,19 @@ mod tests {
 
     #[test]
     fn still_sample_names_the_file() {
-        let t = still("ロゴ.lgd", None);
+        let t = still("ロゴ.lgd", Fades::default());
         assert!(t.contains("EraseLOGO(logofile=\"ロゴ.lgd\", start=300, end=15299, interlaced=true)"));
     }
 
     #[test]
-    fn still_sample_carries_the_measured_call() {
-        let t = still("a.lgd", Some("EraseLOGO(logofile=\"a.lgd\", start=5, end=9, fadein=2, interlaced=true)"));
-        assert!(t.contains("\r\n#EraseLOGO(logofile=\"a.lgd\", start=5, end=9, fadein=2, interlaced=true)\r\n"));
-        assert!(!t.contains("start=300"));
+    fn still_sample_carries_the_measured_fades() {
+        let t = still("a.lgd", Fades { fadein: Some(21), fadeout: Some(28) });
+        assert!(t.contains("#EraseLOGO(logofile=\"a.lgd\", start=300, end=15299, fadein=21, fadeout=28, interlaced=true).EraseLOGO(logofile=\"a.lgd\", start=18000, end=32399, fadein=21, fadeout=28, interlaced=true)\r\n"));
+        let t = still("a.lgd", Fades { fadein: Some(0), fadeout: Some(0) });
+        assert!(t.contains("start=300, end=15299, interlaced=true)"));
+        assert!(t.contains("フェードせずに"));
+        let t = still("a.lgd", Fades { fadein: Some(21), fadeout: None });
+        assert!(t.contains("end=15299, fadein=21, interlaced=true)"));
+        assert!(t.contains("消えるところが無く"));
     }
 }
