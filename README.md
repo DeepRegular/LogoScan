@@ -56,8 +56,9 @@ Recordings can also be dropped on the window (hold Shift to add to the inputs in
 3. **Analyse.** When it finishes, the logo appears on a checkerboard — in its own colours, as translucent as
    it is — and the picture switches to the logo removed. Move the slider to see how it holds up on other scenes.
 4. Name the logo and **Save**.
-5. **区間を探す** (Find the stretches) reads the recording again for where the logo is on screen and how it
-   fades (see "Where the logo is on screen" below); the call in the results becomes one `EraseLOGO` per stretch.
+5. **ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) reads the recording again
+   (see "Where the logo is on screen" below); the call in the results becomes one `EraseLOGO` per stretch,
+   and the sample .avs written in step 4 is written again with it.
 
 For a moving logo, switch *Analyse* to **Moving logo** (see "A logo that moves" below). Open many recordings
 (*Add…*, or drop with Shift held), box the area the animation passes through and press **Analyse**. The result
@@ -177,7 +178,8 @@ file, the count may start a frame or two apart, so check the result.
 ### Sample scripts
 
 Each logo file gets a sample of how to use it, an .avs of the same name (CP932, CRLF line ends). `lgdscan anim`
-always writes one beside the .ldp; the window writes one on saving while *also write a sample .avs* is ticked;
+always writes one beside the .ldp and `lgdscan spans` beside the .lgd; the window writes one on saving while
+*also write a sample .avs* is ticked, and again when **ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) finishes after the save;
 `lgdscan avs logo.ldp --end 232 --fadeout 22` or `lgdscan avs logo.lgd` writes one afterwards.
 
 For an .ldp it is a plain call of delogomod's `EraseLogomod`, with the measured `end` and `fadeout`:
@@ -198,15 +200,15 @@ The frame numbers are examples. Opening the recording and `LoadPlugin` are left 
 The window's results also show a call ready to use, with **コピー** (Copy) to put it on the clipboard: for a moving logo,
 at the chosen recording's start frame with the measured `end` and `fadeout`; for a station logo, over the analysed
 range (the whole recording when none is set), with `interlaced` from the scan type. That is one range until
-**区間を探す** (Find the stretches) is pressed; then it is one call per stretch the logo is on screen, and the
-saved sample carries it too.
+**ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) is pressed; then it is one call per stretch the logo is on screen, and the
+sample carries it too, whether it was saved before or after.
 
 ## Where the logo is on screen
 
 `EraseLOGO` run where there is no logo prints the logo's shape into the picture, so it has to be called per
 stretch, leaving out the commercials. Some stations also fade their logo in after a break and out before one;
 there `fadein` and `fadeout` have to match too, or the logo lingers as it comes and goes. `lgdscan spans`
-(**区間を探す** in the window) measures all four.
+(**ロゴの出る区間とフェードを測る** in the window) measures all four.
 
 1. Each frame is measured for the share of the logo whose removal leaves the least step across the edges the
    logo draws. The edges are taken in chroma as well as luma: a logo drawn in colours on an evenly translucent

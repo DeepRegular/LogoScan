@@ -54,6 +54,8 @@ usage:
                              where the station logo is on screen, and how
                              it fades in and out: prints delogo's EraseLOGO
                              with start, end, fadein and fadeout per stretch
+                             (also written into the sample beside the .lgd,
+                             with .avs)
       --start SEC / --end SEC  range to read (frames still count from the
                              recording's first)
       --scan auto|progressive|interlaced  for interlaced= (default auto)
@@ -402,7 +404,11 @@ fn cmd_spans(args: &[String]) -> Res {
         Scan::Interlaced => true,
     };
     let name = logo_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    println!("{}", lgdscan::spans::erase_call(&name, &spans, offset, interlaced));
+    let call = lgdscan::spans::erase_call(&name, &spans, offset, interlaced);
+    println!("{call}");
+    let sample = lgdscan::avs::path_for(logo_path);
+    lgdscan::avs::write(&sample, &lgdscan::avs::still(&name, Some(&call)))?;
+    eprintln!("wrote the sample {}", sample.display());
     Ok(())
 }
 

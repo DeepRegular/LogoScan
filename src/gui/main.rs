@@ -228,6 +228,9 @@ struct App {
     /// frame the stretches count from.
     spans_task: Option<Task<(PathBuf, Vec<Span>, u64)>>,
     spans: Option<(PathBuf, Vec<Span>, u64)>,
+    /// Where the logo shown was last saved, so stretches found after the
+    /// save can still go into the sample beside it.
+    saved: Option<PathBuf>,
     show_erased: bool,
     name: String,
 
@@ -282,6 +285,7 @@ impl Default for App {
             outcome: None,
             spans_task: None,
             spans: None,
+            saved: None,
             show_erased: false,
             name: String::new(),
             mode: Mode::Still,
@@ -393,6 +397,7 @@ impl App {
         self.logo = Some(logo);
         self.outcome = outcome;
         self.spans = None;
+        self.saved = None;
         // Stretches still being looked for are of the previous logo.
         if let Some(t) = self.spans_task.take() {
             t.cancel.store(true, Ordering::Relaxed);
@@ -473,6 +478,14 @@ impl App {
                 Ok(found) => {
                     self.status = format!("ロゴの出ている区間が {} か所見つかりました", found.1.len());
                     self.spans = Some(found);
+                    // Saved before the stretches were found: the sample
+                    // beside it was written without them.
+                    if let Some(path) = self.saved.clone().filter(|_| self.write_sample) {
+                        self.status = match self.write_still_sample(&path) {
+                            Ok(sample) => format!("{}。サンプル {} に書き足しました", self.status, sample.display()),
+                            Err(e) => format!("{}。サンプルは書けません: {e}", self.status),
+                        };
+                    }
                 }
                 Err(e) => self.status = e,
             }
@@ -660,6 +673,14 @@ impl App {
         if !self.write_sample {
             return msg;
         }
+        match self.write_still_sample(path) {
+            Ok(sample) => format!("{msg}。サンプルを {} に書きました", sample.display()),
+            Err(e) => format!("{msg}。サンプルは書けません: {e}"),
+        }
+    }
+
+    /// Writes the sample beside a .lgd, with the stretches when found.
+    fn write_still_sample(&self, path: &Path) -> Result<PathBuf, String> {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let sample = lgdscan::avs::path_for(path);
         let interlaced = match self.scan {
@@ -668,10 +689,8 @@ impl App {
             Scan::Interlaced => true,
         };
         let measured = self.found_spans().map(|(_, s, offset)| spans::erase_call(&name, s, *offset, interlaced));
-        match lgdscan::avs::write(&sample, &lgdscan::avs::still(&name, measured.as_deref())) {
-            Ok(()) => format!("{msg}。サンプルを {} に書きました", sample.display()),
-            Err(e) => format!("{msg}。サンプルは書けません: {e}"),
-        }
+        lgdscan::avs::write(&sample, &lgdscan::avs::still(&name, measured.as_deref()))?;
+        Ok(sample)
     }
 
     fn save_still(&mut self) {
@@ -697,7 +716,10 @@ impl App {
             w.flush()
         });
         self.status = match r {
-            Ok(()) => self.saved_lgd(&path),
+            Ok(()) => {
+                self.saved = Some(path.clone());
+                self.saved_lgd(&path)
+            }
             Err(e) => format!("保存できません: {e}"),
         };
     }
@@ -1226,7 +1248,7 @@ impl App {
                                 t.cancel.store(true, Ordering::Relaxed);
                             }
                         } else if ui
-                            .add_enabled(self.scan_task.is_none(), egui::Button::new("区間を探す"))
+                            .add_enabled(self.scan_task.is_none(), egui::Button::new("ロゴの出る区間とフェードを測る"))
                             .on_hover_text("録画を読み直して、ロゴの出ている区間（CM の間を除く）と、フェードする局ではフェードの長さを測ります")
                             .clicked()
                         {
