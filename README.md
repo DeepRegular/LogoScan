@@ -14,7 +14,7 @@ Build the `.lgd` that the transparent-logo filter removes, straight from a recor
 English ・ [日本語](README.ja.md)
 
 <img src="docs/screenshot.png" width="900"
-     alt="The LogoScan window: a test picture with a box around the logo, which is shown removed; on the right, the detected candidates, the analysis settings, and the extracted logo's opacity as a black-and-white image">
+     alt="The LogoScan window: a test picture with a box around the logo, which is shown removed; on the right, the detected candidates, the analysis settings, and the extracted logo in its colours on a checkerboard, as translucent as it is">
 
 </div>
 
