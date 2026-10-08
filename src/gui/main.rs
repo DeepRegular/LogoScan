@@ -1249,32 +1249,7 @@ impl App {
                     ui.checkbox(&mut self.write_sample, "サンプルの .avs も書く")
                         .on_hover_text("delogo での使い方を、.lgd と同じ名前の .avs に書きます");
                 });
-                if let Some((_, spans, _, fades)) = self.found_spans() {
-                    let fade = |what: &str, v: Option<u64>| match v {
-                        Some(0) => format!("{what}なし"),
-                        Some(f) => format!("{what} {f} フレーム"),
-                        None => format!("{what}は測れず"),
-                    };
-                    ui.label(format!("ロゴの出ている区間 {} か所", spans.len()));
-                    ui.label(format!("{}・{}", fade("フェードイン", fades.fadein), fade("フェードアウト", fades.fadeout)));
-                }
-                if let Some(call) = self.still_call() {
-                    ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
-                    let hover = if self.range_on { "指定した範囲での呼び方" } else { "録画全体での呼び方（CM の間は外してください）" };
-                    ui.horizontal(|ui| {
-                        if ui.button("コピー").on_hover_text(hover).clicked() {
-                            ctx.copy_text(call.clone());
-                        }
-                        if let Some(rec) = self.recording_call() {
-                            if ui
-                                .button("この録画用の .avs を保存…")
-                                .on_hover_text("ロゴの出ている区間ごとの呼び出しを、読み込んだ録画専用のスクリプトとして書きます")
-                                .clicked()
-                            {
-                                self.save_recording_avs(&rec);
-                            }
-                        }
-                    });
+                if self.info.is_some() {
                     ui.horizontal(|ui| {
                         if let Some(t) = &self.spans_task {
                             let (f, _) = t.progress();
@@ -1290,6 +1265,31 @@ impl App {
                             self.start_spans(&ctx);
                         }
                     });
+                }
+                if let Some((_, spans, _, fades)) = self.found_spans() {
+                    let fade = |what: &str, v: Option<u64>| match v {
+                        Some(0) => format!("{what}なし"),
+                        Some(f) => format!("{what} {f} フレーム"),
+                        None => format!("{what}は測れず"),
+                    };
+                    ui.label(format!("ロゴの出ている区間 {} か所", spans.len()));
+                    ui.label(format!("{}・{}", fade("フェードイン", fades.fadein), fade("フェードアウト", fades.fadeout)));
+                }
+                if let Some(rec) = self.recording_call() {
+                    if ui
+                        .button("この録画用の .avs を保存…")
+                        .on_hover_text("ロゴの出ている区間ごとの呼び出しを、読み込んだ録画専用のスクリプトとして書きます")
+                        .clicked()
+                    {
+                        self.save_recording_avs(&rec);
+                    }
+                }
+                if let Some(call) = self.still_call() {
+                    ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
+                    let hover = if self.range_on { "指定した範囲での呼び方" } else { "録画全体での呼び方（CM の間は外してください）" };
+                    if ui.button("コピー").on_hover_text(hover).clicked() {
+                        ctx.copy_text(call);
+                    }
                 }
             } else {
                 ui.label(egui::RichText::new("まだありません").weak());
