@@ -640,7 +640,7 @@ impl App {
     }
 
     /// delogo's EraseLOGO for the station logo, over the analysed range or
-    /// the whole recording.
+    /// the whole recording, with the fades when measured.
     fn still_call(&self) -> Option<String> {
         let info = self.info.as_ref()?;
         if info.frame_rate <= 0.0 {
@@ -660,10 +660,29 @@ impl App {
             Scan::Interlaced => true,
         };
         let lgd = if self.name.is_empty() { "logo.lgd".to_string() } else { format!("{}.lgd", self.name) };
-        if let Some((_, spans, offset, _)) = self.found_spans() {
-            return Some(spans::erase_call(&lgd, spans, *offset, interlaced));
+        let mut fade = String::new();
+        if let Some((.., fades)) = self.found_spans() {
+            if let Some(f @ 1..) = fades.fadein {
+                fade.push_str(&format!(", fadein={f}"));
+            }
+            if let Some(f @ 1..) = fades.fadeout {
+                fade.push_str(&format!(", fadeout={f}"));
+            }
         }
-        Some(format!("EraseLOGO(logofile=\"{lgd}\", start={start}, end={end}, interlaced={interlaced})"))
+        Some(format!("EraseLOGO(logofile=\"{lgd}\", start={start}, end={end}{fade}, interlaced={interlaced})"))
+    }
+
+    /// The calls for the recording read, one per stretch the logo is on
+    /// screen, once they have been measured.
+    fn recording_call(&self) -> Option<String> {
+        let (_, spans, offset, _) = self.found_spans()?;
+        let interlaced = match self.scan {
+            Scan::Auto => self.info.as_ref()?.interlaced,
+            Scan::Progressive => false,
+            Scan::Interlaced => true,
+        };
+        let lgd = if self.name.is_empty() { "logo.lgd".to_string() } else { format!("{}.lgd", self.name) };
+        Some(spans::erase_call(&lgd, spans, *offset, interlaced))
     }
 
     /// The stretches found, while they still belong to the first input.
@@ -1241,19 +1260,19 @@ impl App {
                 }
                 if let Some(call) = self.still_call() {
                     ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
-                    let hover = if self.found_spans().is_some() {
-                        "ロゴの出ている区間ごとの呼び方"
-                    } else if self.range_on {
-                        "指定した範囲での呼び方"
-                    } else {
-                        "録画全体での呼び方（CM の間は外してください）"
-                    };
+                    let hover = if self.range_on { "指定した範囲での呼び方" } else { "録画全体での呼び方（CM の間は外してください）" };
                     ui.horizontal(|ui| {
                         if ui.button("コピー").on_hover_text(hover).clicked() {
                             ctx.copy_text(call.clone());
                         }
-                        if ui.button("この録画用の .avs を保存…").on_hover_text("この呼び出しを、読み込んだ録画専用のスクリプトとして書きます").clicked() {
-                            self.save_recording_avs(&call);
+                        if let Some(rec) = self.recording_call() {
+                            if ui
+                                .button("この録画用の .avs を保存…")
+                                .on_hover_text("ロゴの出ている区間ごとの呼び出しを、読み込んだ録画専用のスクリプトとして書きます")
+                                .clicked()
+                            {
+                                self.save_recording_avs(&rec);
+                            }
                         }
                     });
                     ui.horizontal(|ui| {

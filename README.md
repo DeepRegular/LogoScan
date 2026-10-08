@@ -57,9 +57,9 @@ Recordings can also be dropped on the window (hold Shift to add to the inputs in
    it is — and the picture switches to the logo removed. Move the slider to see how it holds up on other scenes.
 4. Name the logo and **Save**.
 5. **ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) reads the recording again
-   (see "Where the logo is on screen" below); the call in the results becomes one `EraseLOGO` per stretch,
-   and the sample .avs written in step 4 takes the measured fades. **この録画用の .avs を保存…** (Save an .avs for
-   this recording) writes that recording's own script.
+   (see "Where the logo is on screen" below); the call in the results and the sample .avs written in step 4 take
+   the measured fades (`fadein`, `fadeout`). **この録画用の .avs を保存…** (Save an .avs for this recording) writes
+   that recording's own script, one call per stretch measured.
 
 For a moving logo, switch *Analyse* to **Moving logo** (see "A logo that moves" below). Open many recordings
 (*Add…*, or drop with Shift held), box the area the animation passes through and press **Analyse**. The result
@@ -202,9 +202,10 @@ The frame numbers are examples. Opening the recording and `LoadPlugin` are left 
 
 The window's results also show a call ready to use, with **コピー** (Copy) to put it on the clipboard: for a moving logo,
 at the chosen recording's start frame with the measured `end` and `fadeout`; for a station logo, over the analysed
-range (the whole recording when none is set), with `interlaced` from the scan type. That is one range until
-**ロゴの出る区間とフェードを測る** (Measure where the logo shows and how it fades) is pressed; then it is one call per stretch the logo is on screen. The sample takes only the measured fades;
-**この録画用の .avs を保存…** (Save an .avs for this recording) writes the line itself as a script of its own.
+range (the whole recording when none is set), with `interlaced` from the scan type. Once **ロゴの出る区間とフェードを測る**
+(Measure where the logo shows and how it fades) has been pressed, the line also carries the measured fades. The
+recording's own script, one call per stretch, is written only by **この録画用の .avs を保存…** (Save an .avs for
+this recording).
 
 ## Where the logo is on screen
 
