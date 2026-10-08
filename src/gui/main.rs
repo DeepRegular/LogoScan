@@ -557,6 +557,28 @@ impl App {
         };
     }
 
+    /// delogo's EraseLOGO for the station logo, over the analysed range or
+    /// the whole recording.
+    fn still_call(&self) -> Option<String> {
+        let info = self.info.as_ref()?;
+        if info.frame_rate <= 0.0 {
+            return None;
+        }
+        let frame = |t: f64| (t * info.frame_rate).round() as u64;
+        let (start, end) = if self.range_on {
+            (frame(self.range.0), frame(self.range.1).saturating_sub(1))
+        } else {
+            (0, frame(info.duration).saturating_sub(1))
+        };
+        let interlaced = match self.scan {
+            Scan::Auto => info.interlaced,
+            Scan::Progressive => false,
+            Scan::Interlaced => true,
+        };
+        let lgd = if self.name.is_empty() { "logo.lgd".to_string() } else { format!("{}.lgd", self.name) };
+        Some(format!("EraseLOGO(logofile=\"{lgd}\", start={start}, end={end}, interlaced={interlaced})"))
+    }
+
     /// The message for a saved .lgd, after writing its sample script.
     fn saved_lgd(&self, path: &Path) -> String {
         let msg = format!("{} に保存しました", path.display());
@@ -1076,6 +1098,13 @@ impl App {
                     ui.checkbox(&mut self.write_sample, "サンプルの .avs も書く")
                         .on_hover_text("delogo での使い方を、.lgd と同じ名前の .avs に書きます");
                 });
+                if let Some(call) = self.still_call() {
+                    ui.add(egui::Label::new(egui::RichText::new(&call).monospace()).wrap());
+                    let hover = if self.range_on { "指定した範囲での呼び方" } else { "録画全体での呼び方（CM の間は外してください）" };
+                    if ui.button("コピー").on_hover_text(hover).clicked() {
+                        ctx.copy_text(call);
+                    }
+                }
             } else {
                 ui.label(egui::RichText::new("まだありません").weak());
             }

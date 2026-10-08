@@ -181,6 +181,11 @@ For an .lgd it is delogo's `EraseLOGO`, one call per stretch of the programme:
 
 The frame numbers are examples. Opening the recording and `LoadPlugin` are left to your own script.
 
+The window's results also show a call ready to use, with **コピー** (Copy) to put it on the clipboard: for a moving logo,
+at the chosen recording's start frame with the measured `end` and `fadeout`; for a station logo, over the analysed
+range (the whole recording when none is set), with `interlaced` from the scan type. That is one range, so split it
+round the commercials.
+
 ## Finding the logo
 
 The pictures change; the logo does not. Keyframes are sampled across the recording and, for every pixel,
