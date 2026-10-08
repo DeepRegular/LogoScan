@@ -10,8 +10,8 @@ use crate::anim::Hold;
 /// frame from `start`, then holds the last until `end`, fading it out.
 pub fn moving(ldp: &str, frames: usize, hold: Option<Hold>) -> String {
     let (length, fadeout, note) = match hold {
-        Some(h) => (h.end.to_string(), h.fadeout.to_string(), "end と fadeout は、止まったロゴが消えていく様子を録画から測った値です。"),
-        None => ("0".into(), "0".into(), "end と fadeout は測れませんでした。止まったロゴが消えるまでの長さを入れてください。"),
+        Some(h) => (h.end.to_string(), h.fadeout.to_string(), "end と fadeout は、局ロゴが消えていく様子を録画から測った値です。"),
+        None => ("0".into(), "0".into(), "end と fadeout は測れませんでした。局ロゴが消えるまでの長さを入れてください。"),
     };
     let mut s = String::new();
     s.push_str(&format!("# {ldp} を delogomod で使うサンプル（lgdscan が書きました）\n"));

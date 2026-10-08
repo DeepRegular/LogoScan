@@ -517,11 +517,11 @@ impl App {
                 &|p| {
                     let (i, what) = match p.stage {
                         Stage::Align => (0, "録画どうしの位置を合わせています".to_string()),
-                        Stage::Locate => (1, "止まったロゴを探しています".to_string()),
-                        Stage::Still => (2, "止まったロゴを当てはめています".to_string()),
+                        Stage::Locate => (1, "局ロゴを探しています".to_string()),
+                        Stage::Still => (2, "局ロゴを当てはめています".to_string()),
                         Stage::Coarse => (3, "粗く当てはめています".to_string()),
                         Stage::Fine(n) => (3 + n as usize, format!("当てはめています（{n}/4）")),
-                        Stage::Fade => (8, "止まったロゴの消え方を測っています".to_string()),
+                        Stage::Fade => (8, "局ロゴの消え方を測っています".to_string()),
                     };
                     let f = (i as f64 + p.done as f64 / p.total.max(1) as f64) / 9.0;
                     report(f as f32, format!("{what}  {}/{} 本", p.done, p.total));
@@ -700,7 +700,7 @@ impl App {
                 self.save_ldp();
             }
             let has_still = self.anim.as_ref().is_some_and(|a| a.still.is_some());
-            if ui.add_enabled(has_still, egui::Button::new("止まったロゴを保存（.lgd）…")).clicked() {
+            if ui.add_enabled(has_still, egui::Button::new("局ロゴを保存（.lgd）…")).clicked() {
                 self.save_still();
             }
         });
@@ -917,7 +917,7 @@ impl App {
             ui.separator();
             ui.heading("解析");
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.mode, Mode::Still, "止まったロゴ");
+                ui.selectable_value(&mut self.mode, Mode::Still, "局ロゴ");
                 ui.selectable_value(&mut self.mode, Mode::Moving, "動くロゴ")
                     .on_hover_text("番組の頭でアニメーションしながら出てくるロゴ。1 フレームごとのロゴを .ldp に書きます");
             });
